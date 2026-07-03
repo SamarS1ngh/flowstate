@@ -1,6 +1,16 @@
 import {Innertube} from 'youtubei.js';
 
-export class StreamResolveError extends Error {}
+export class StreamResolveError extends Error {
+  cause?: unknown;
+
+  constructor(message?: string, options?: {cause?: unknown}) {
+    super(message);
+    this.name = 'StreamResolveError';
+    if (options?.cause !== undefined) {
+      this.cause = options.cause;
+    }
+  }
+}
 
 export interface AudioFormatLike {
   mimeType: string;
@@ -40,7 +50,12 @@ async function innertube(): Promise<Innertube> {
 const CLIENTS = ['IOS', 'ANDROID_VR'] as const;
 
 export async function resolveStreamUrl(videoId: string): Promise<string> {
-  const tube = await innertube();
+  let tube: Innertube;
+  try {
+    tube = await innertube();
+  } catch (e) {
+    throw new StreamResolveError('session bootstrap failed: ' + String(e), {cause: e});
+  }
   let lastErr: unknown;
   for (const client of CLIENTS) {
     try {
@@ -69,7 +84,10 @@ export async function resolveStreamUrl(videoId: string): Promise<string> {
       lastErr = e;
     }
   }
+  // Reset the cached singleton so the next call re-bootstraps fresh.
+  yt = null;
   throw new StreamResolveError(
     `could not resolve stream for ${videoId}: ${String(lastErr)}`,
+    {cause: lastErr},
   );
 }
