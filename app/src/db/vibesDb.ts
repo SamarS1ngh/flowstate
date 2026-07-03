@@ -75,8 +75,9 @@ function appDbPath(): string {
 export async function importVibesDb(sourcePath: string): Promise<void> {
   const dest = appDbPath();
   await RNFS.copyFile(sourcePath, dest);
-  const db = open({name: DB_FILENAME, location: RNFS.DocumentDirectoryPath});
+  let db: DB | undefined;
   try {
+    db = open({name: DB_FILENAME, location: RNFS.DocumentDirectoryPath});
     const res = db.executeSync(
       `SELECT value FROM meta WHERE key = 'schema_version'`,
     );
@@ -87,7 +88,7 @@ export async function importVibesDb(sourcePath: string): Promise<void> {
       );
     }
   } catch (e) {
-    db.close();
+    db?.close();
     await RNFS.unlink(dest).catch(() => {});
     throw e instanceof Error ? e : new Error('vibes.db is not a valid database file');
   }
