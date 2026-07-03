@@ -27,7 +27,7 @@ def cmd_run(args) -> None:
     from .fetch import download_audio
     from .features import Extractor
 
-    extractor = Extractor(args.models)
+    extractor = Extractor(args.models, segment_s=args.segment)
     failed = 0
     for i, vid in enumerate(todo, 1):
         print(f"[{i}/{len(todo)}] {vid}", flush=True)
@@ -65,6 +65,12 @@ def main() -> None:
     run.add_argument("--db", default="out/vibes.db")
     run.add_argument("--models", default="models")
     run.add_argument("--limit", type=int, help="analyze at most N songs (for testing)")
+    run.add_argument(
+        "--segment",
+        type=int,
+        default=120,
+        help="seconds of the centered middle segment to analyze per song; 0 = analyze full track",
+    )
     run.set_defaults(func=cmd_run)
 
     srv = sub.add_parser("serve", help="share vibes.db over wifi for the app")
