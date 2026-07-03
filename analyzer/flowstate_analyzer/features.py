@@ -16,16 +16,26 @@ from .db import Features
 
 EMBEDDING_MODEL = "msd-musicnn-1.pb"
 
-# Head model files; every head outputs [positive, negative] class probabilities,
-# so index 0 is the score we keep.
+# Head model files. Each head is a binary softmax classifier, but the essentia
+# metadata JSON (https://essentia.upf.edu/models/classification-heads/<head>/
+# <head>-msd-musicnn-1.json, "classes" field) shows the positive-class index is
+# NOT consistent across heads:
+#   mood_happy:      ["happy", "non_happy"]          -> index 0
+#   mood_sad:        ["non_sad", "sad"]              -> index 1
+#   mood_relaxed:    ["non_relaxed", "relaxed"]      -> index 1
+#   mood_aggressive: ["aggressive", "not_aggressive"]-> index 0
+#   mood_acoustic:   ["acoustic", "non_acoustic"]    -> index 0
+#   mood_party:      ["non_party", "party"]          -> index 1
+#   danceability:    ["danceable", "not_danceable"]  -> index 0
+# so each entry below is (filename, positive_class_index).
 MOOD_HEADS = {
-    "happy": "mood_happy-msd-musicnn-1.pb",
-    "sad": "mood_sad-msd-musicnn-1.pb",
-    "relaxed": "mood_relaxed-msd-musicnn-1.pb",
-    "aggressive": "mood_aggressive-msd-musicnn-1.pb",
-    "danceable": "danceability-msd-musicnn-1.pb",
-    "acoustic": "mood_acoustic-msd-musicnn-1.pb",
-    "party": "mood_party-msd-musicnn-1.pb",
+    "happy": ("mood_happy-msd-musicnn-1.pb", 0),
+    "sad": ("mood_sad-msd-musicnn-1.pb", 1),
+    "relaxed": ("mood_relaxed-msd-musicnn-1.pb", 1),
+    "aggressive": ("mood_aggressive-msd-musicnn-1.pb", 0),
+    "danceable": ("danceability-msd-musicnn-1.pb", 0),
+    "acoustic": ("mood_acoustic-msd-musicnn-1.pb", 0),
+    "party": ("mood_party-msd-musicnn-1.pb", 1),
 }
 
 
@@ -36,8 +46,11 @@ class Extractor:
             graphFilename=str(d / EMBEDDING_MODEL), output="model/dense/BiasAdd"
         )
         self._heads = {
-            name: TensorflowPredict2D(graphFilename=str(d / fn), output="model/Softmax")
-            for name, fn in MOOD_HEADS.items()
+            name: (
+                TensorflowPredict2D(graphFilename=str(d / fn), output="model/Softmax"),
+                positive_index,
+            )
+            for name, (fn, positive_index) in MOOD_HEADS.items()
         }
 
     def extract(self, audio_path: str | Path) -> Features:
@@ -46,9 +59,9 @@ class Extractor:
         embedding = np.asarray(patches).mean(axis=0).astype(np.float32)
 
         moods = {}
-        for name, head in self._heads.items():
+        for name, (head, positive_index) in self._heads.items():
             probs = np.asarray(head(patches))  # shape: (n_patches, 2)
-            moods[name] = float(probs.mean(axis=0)[0])
+            moods[name] = float(probs.mean(axis=0)[positive_index])
 
         audio44 = MonoLoader(filename=str(audio_path), sampleRate=44100)()
         bpm = float(RhythmExtractor2013(method="multifeature")(audio44)[0])
