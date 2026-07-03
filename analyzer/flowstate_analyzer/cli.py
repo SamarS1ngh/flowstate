@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import http.server
 import sys
 import tempfile
 from pathlib import Path
@@ -43,15 +44,35 @@ def cmd_run(args) -> None:
     print(f"Done. {len(todo) - failed} analyzed, {failed} failed.")
 
 
-def cmd_serve(args) -> None:
-    import functools
-    import http.server
+def make_db_only_handler(db_path: Path) -> type:
+    """Build a BaseHTTPRequestHandler that serves *only* db_path's bytes at
+    /<db_path.name>, and 404s everything else (including "/"). No directory
+    listing, no access to sibling files (e.g. browser.json)."""
+    db_path = Path(db_path).resolve()
+    route = f"/{db_path.name}"
 
+    class DbOnlyHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path != route:
+                self.send_error(404)
+                return
+            data = db_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, fmt: str, *args) -> None:
+            pass  # keep default stderr logging quiet during tests
+
+    return DbOnlyHandler
+
+
+def cmd_serve(args) -> None:
     db_path = Path(args.db).resolve()
-    handler = functools.partial(
-        http.server.SimpleHTTPRequestHandler, directory=str(db_path.parent)
-    )
-    print(f"Serving {db_path.parent} on port {args.port}")
+    handler = make_db_only_handler(db_path)
+    print(f"Serving only {db_path.name} (not its containing directory) on port {args.port}")
     print(f"On your phone (same wifi): http://<this-machine-ip>:{args.port}/{db_path.name}")
     http.server.HTTPServer(("0.0.0.0", args.port), handler).serve_forever()
 

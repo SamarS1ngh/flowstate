@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from flowstate_analyzer import db
 
@@ -56,3 +57,14 @@ def test_replace_playlists_is_full_replace(tmp_path):
     db.replace_playlists(conn, [db.Playlist("p1", "Chill", ["b"])])
     rows = conn.execute("SELECT video_id, position FROM playlist_songs").fetchall()
     assert rows == [("b", 0)]
+
+
+def test_connect_rejects_mismatched_schema_version(tmp_path):
+    db_path = tmp_path / "v.db"
+    conn = db.connect(db_path)
+    conn.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(ValueError, match="2"):
+        db.connect(db_path)

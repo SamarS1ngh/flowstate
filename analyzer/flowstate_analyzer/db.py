@@ -67,6 +67,16 @@ def connect(path: str | Path) -> sqlite3.Connection:
         (SCHEMA_VERSION,),
     )
     conn.commit()
+
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    found_version = row[0] if row else None
+    if found_version != SCHEMA_VERSION:
+        conn.close()
+        raise ValueError(
+            f"{path}: unsupported schema_version '{found_version}' "
+            f"(this analyzer expects '{SCHEMA_VERSION}'); refusing to open a "
+            "database that may use a different, incompatible schema"
+        )
     return conn
 
 
