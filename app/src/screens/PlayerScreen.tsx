@@ -113,6 +113,7 @@ export default function PlayerScreen() {
   // comparing against the previous source by reference.
   useEffect(() => {
     setSelectedMood(null);
+    previousIdRef.current = null;
     if (src instanceof VibeQueue) src.setMoodFilter(null);
   }, [src]);
 
