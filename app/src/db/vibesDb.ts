@@ -10,11 +10,20 @@ import {open, DB} from '@op-engineering/op-sqlite';
 // react-native-fs, so the rest of the brief's logic is preserved as written.
 import * as RNFS from '@dr.pogodin/react-native-fs';
 import {Playlist, Song} from '../types';
+import {VibeSong} from '../engine/similarity';
+import {embeddingFromBlob} from './blob';
 
 export const DB_FILENAME = 'vibes.db';
 
 const SONG_COLS = `s.video_id, s.title, s.artist, s.duration_s,
   EXISTS(SELECT 1 FROM features f WHERE f.video_id = s.video_id) AS has_vibe`;
+
+// Analyzed-only join: features.video_id is only present once the analyzer
+// has processed a song, so an INNER JOIN here is exactly the "analyzed"
+// filter -- no separate has_vibe check needed.
+const VIBE_SONG_COLS = `${SONG_COLS},
+  f.embedding, f.mood_happy, f.mood_sad, f.mood_relaxed, f.mood_aggressive,
+  f.danceable, f.acoustic, f.party`;
 
 function rowToSong(r: any): Song {
   return {
@@ -23,6 +32,25 @@ function rowToSong(r: any): Song {
     artist: r.artist,
     durationS: r.duration_s ?? null,
     hasVibe: !!r.has_vibe,
+  };
+}
+
+// Extracted as a standalone function (rather than inlined in getVibeSongs)
+// so the row-mapping logic reads clearly, mirroring rowToSong above.
+function rowToVibeSong(r: any): VibeSong {
+  return {
+    videoId: r.video_id,
+    embedding: embeddingFromBlob(r.embedding),
+    moods: {
+      happy: r.mood_happy,
+      sad: r.mood_sad,
+      relaxed: r.mood_relaxed,
+      aggressive: r.mood_aggressive,
+      danceable: r.danceable,
+      acoustic: r.acoustic,
+      party: r.party,
+    },
+    song: rowToSong(r),
   };
 }
 
@@ -65,6 +93,32 @@ export class VibesDb {
       [videoId],
     );
     return res.rows.length ? rowToSong(res.rows[0]) : null;
+  }
+
+  // Analyzed songs in scope, ready to feed a VibeQueue. 'ALL' scopes to the
+  // whole library (mirrors getAllSongs/getPlaylistSongs' playlistId param).
+  getVibeSongs(playlistId: string | 'ALL'): VibeSong[] {
+    const res =
+      playlistId === 'ALL'
+        ? this.db.executeSync(
+            `SELECT ${VIBE_SONG_COLS} FROM songs s
+             JOIN features f ON f.video_id = s.video_id
+             ORDER BY s.artist, s.title`,
+          )
+        : this.db.executeSync(
+            `SELECT ${VIBE_SONG_COLS} FROM playlist_songs ps
+             JOIN songs s USING (video_id)
+             JOIN features f ON f.video_id = s.video_id
+             WHERE ps.playlist_id = ? ORDER BY ps.position`,
+            [playlistId],
+          );
+    return res.rows.map(rowToVibeSong);
+  }
+
+  // Raw handle so FeedbackStore (a thin op-sqlite adapter of its own) can
+  // share the same open connection instead of re-opening vibes.db.
+  get handle(): DB {
+    return this.db;
   }
 }
 

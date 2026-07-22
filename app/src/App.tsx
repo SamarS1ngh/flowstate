@@ -10,6 +10,8 @@ import LibraryScreen from './screens/LibraryScreen';
 import PlaylistScreen from './screens/PlaylistScreen';
 import PlayerScreen from './screens/PlayerScreen';
 import SettingsScreen from './screens/SettingsScreen';
+import {openVibesDb} from './db/vibesDb';
+import {FeedbackStore} from './engine/feedbackStore';
 
 export type RootStackParamList = {
   Library: undefined;
@@ -71,6 +73,15 @@ export default function App() {
           Capability.SkipToNext,
         ],
       });
+      // Feedback tables live inside vibes.db itself, so they can only be
+      // created once a db has actually been imported. If the user imports
+      // vibes.db for the first time after this bootstrap already ran (no
+      // app restart), PlaylistScreen/PlayerScreen defensively call
+      // ensureTables() again themselves before touching FeedbackStore --
+      // it's an idempotent CREATE TABLE IF NOT EXISTS, so calling it twice
+      // is harmless.
+      const db = await openVibesDb();
+      if (db) new FeedbackStore(db.handle).ensureTables();
       setReady(true);
     })();
   }, []);
