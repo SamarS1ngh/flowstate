@@ -1,3 +1,9 @@
 analyzer/.venv/
 analyzer/out/
 analyzer/auth/
+
+app/node_modules/
+app/android/app/build/
+app/android/.gradle/
+app/android/build/
+app/android/app/*.keystore

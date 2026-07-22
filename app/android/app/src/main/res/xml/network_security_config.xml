@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  RN's gradle plugin sets usesCleartextTraffic="false" in release builds
+  (see AndroidManifest.xml's ${usesCleartextTraffic} placeholder), which by
+  default blocks the "Sync from PC over wifi" feature in SettingsScreen —
+  that flow talks to the analyzer's `serve` command over a plain http://
+  URL on the user's LAN (see SettingsScreen.tsx: DEFAULT_SYNC_URL /
+  onSyncFromWifi).
+
+  A proper fix would scope cleartext to specific domains via
+  <domain-config>, but the sync target is a LAN IP the user types in
+  (e.g. http://192.168.x.x:8765/vibes.db) — it varies per user/network and
+  isn't a fixed hostname, so a domain allowlist isn't practical here.
+
+  PRAGMATIC ALPHA CHOICE: allow cleartext traffic for all hosts. This app is
+  sideload-only alpha, the only cleartext consumer is the opt-in LAN sync
+  feature (nothing else in the app makes plaintext HTTP requests), and the
+  traffic never leaves the local network in the intended use case.
+
+  TODO: tighten this before any wider distribution — either move wifi sync
+  to https (self-signed cert pinning or a lightweight local CA step in the
+  analyzer's `serve` command), or have the user paste just the LAN IP into a
+  dedicated settings field and generate a <domain-config> entry for it at
+  runtime/build time instead of allowing cleartext globally.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
