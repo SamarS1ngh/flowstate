@@ -1,3 +1,5 @@
+import {Song} from '../types';
+
 export function cosine(a: Float32Array, b: Float32Array): number {
   let dot = 0;
   let normA = 0;
@@ -16,6 +18,11 @@ export interface VibeSong {
   videoId: string;
   embedding: Float32Array;
   moods: Record<string, number>;
+  // Seam added in Task 2: VibeQueue.next() must return a full Song (title,
+  // artist, etc.) to satisfy QueueSource, but the engine itself stays pure
+  // and never touches this field -- it exists purely as a payload carried
+  // alongside the analysis data.
+  song: Song;
 }
 
 export function buildPool(

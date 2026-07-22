@@ -28,7 +28,12 @@ describe('cosine', () => {
 });
 
 function song(videoId: string, embedding: number[], moods: Record<string, number> = {}): VibeSong {
-  return {videoId, embedding: new Float32Array(embedding), moods};
+  return {
+    videoId,
+    embedding: new Float32Array(embedding),
+    moods,
+    song: {videoId, title: videoId, artist: 'a', durationS: 100, hasVibe: true},
+  };
 }
 
 describe('buildPool', () => {
