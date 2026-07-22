@@ -17,12 +17,15 @@ import {importVibesDb} from '../db/vibesDb';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
-const DEFAULT_SYNC_URL = 'http://192.168.1.101:8765/vibes.db';
-
 export default function SettingsScreen({navigation}: Props) {
   const [importingFile, setImportingFile] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [syncUrl, setSyncUrl] = useState(DEFAULT_SYNC_URL);
+  // No baked-in default IP -- every user's LAN address is different, so a
+  // hardcoded value here would either be silently wrong (most users) or, if
+  // ever left untouched, quietly point the app at someone else's machine.
+  // An empty field plus placeholder text (below) forces the user to enter
+  // their own analyzer address.
+  const [syncUrl, setSyncUrl] = useState('');
 
   const onImportFromFile = async () => {
     setImportingFile(true);

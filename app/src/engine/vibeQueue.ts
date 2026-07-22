@@ -105,11 +105,29 @@ export class VibeQueue implements QueueSource {
 
   private resolveCenter(lastPlayed: Song | null): VibeSong {
     if (this.mode === 'lock') return this.seed;
-    if (lastPlayed) {
+    // A session-banned lastPlayed (i.e. the song the caller just rejected
+    // via rejectCurrent, then immediately called next() with it as
+    // lastPlayed -- see PlayerScreen's onDoesntFit) must never become the
+    // drift center: that would recenter the whole vibe on the very song the
+    // user just said doesn't fit. Ignore it and fall through to the
+    // history-walk below instead.
+    if (lastPlayed && !this.sessionBans.has(lastPlayed.videoId)) {
       const found = this.byId.get(lastPlayed.videoId);
       if (found) return found;
     }
-    return this.history[this.history.length - 1];
+    // Walk history backwards looking for the most recent non-banned entry
+    // -- covers both "lastPlayed was banned" above and the pre-existing
+    // lastPlayed-missing/unknown case. history's last entry is exactly what
+    // rejectCurrent may have just banned, so this must skip banned ids
+    // rather than blindly returning history[history.length - 1].
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const candidate = this.history[i];
+      if (!this.sessionBans.has(candidate.videoId)) return candidate;
+    }
+    // Entire history is banned (pathological/small-scope edge case) --
+    // the seed itself is never banned (rejectCurrent only ever bans songs
+    // that were actually played), so it's always a safe last resort.
+    return this.seed;
   }
 
   private attemptWeightedPick(center: VibeSong, threshold: number): VibeSong | null {

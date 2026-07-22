@@ -188,6 +188,35 @@ describe('VibeQueue: determinism', () => {
   });
 });
 
+describe('VibeQueue: reject recenter (drift)', () => {
+  test('rejecting the current song in drift mode does not recenter the next pick on it', () => {
+    const q = new VibeQueue(a1, 'drift', baseDeps());
+
+    // First call: pretend lastPlayed is a cluster-B song (same setup as the
+    // "drift mode recenters on lastPlayed" test above), so drift centers
+    // there and returns a cluster-B pick. This is "X" -- the song that's
+    // about to get rejected.
+    const x = q.next(b1.song);
+    expect(x).not.toBeNull();
+    expect(['b2', 'b3']).toContain(x!.videoId);
+
+    q.rejectCurrent(x!.videoId);
+
+    // This mirrors the real bug: skipToNext() calls next(current), and
+    // `current` at this point is X (the just-rejected song) -- controller.ts
+    // doesn't know or care that X was just banned. Before the fix,
+    // resolveCenter would happily center on X (it's in `byId`), so the next
+    // pick would come from X's cluster (B) again -- i.e. the reject would
+    // have no effect on where the vibe drifts to. With the fix, a
+    // session-banned lastPlayed is ignored and resolveCenter walks history
+    // backwards (skipping the now-banned X) to land back on the seed, so
+    // the next pick must come from the seed's cluster (A), not X's (B).
+    const pick = q.next(x!);
+    expect(pick).not.toBeNull();
+    expect(['a2', 'a3']).toContain(pick!.videoId);
+  });
+});
+
 describe('VibeQueue: reset', () => {
   test('reset re-seeds the center for lock mode', () => {
     const q = new VibeQueue(a1, 'lock', baseDeps());

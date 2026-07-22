@@ -34,6 +34,7 @@ const MOOD_CHIPS: Array<{label: string; key: string}> = [
 const FALLBACK_LABEL: Record<FallbackKind, string> = {
   relaxed: 'vibe loosened',
   random: 'vibe map too small — random',
+  error: 'playback failed — check connection',
 };
 
 // TODO(device verification): no device/emulator was available while building
@@ -161,6 +162,14 @@ export default function PlayerScreen() {
         </Text>
       </View>
 
+      {fallbackStatus === 'error' ? (
+        // Surfaced regardless of vibe mode: skipToNext's consecutive-failure
+        // cap can fire for a plain SimpleQueue too (not just VibeQueue), so
+        // this banner isn't gated behind isVibe like the relaxed/random ones
+        // below.
+        <Text style={styles.errorText}>{FALLBACK_LABEL.error}</Text>
+      ) : null}
+
       {isVibe ? (
         <View style={styles.vibeSection}>
           <View style={styles.modeRow}>
@@ -197,7 +206,7 @@ export default function PlayerScreen() {
             })}
           </View>
 
-          {fallbackStatus ? (
+          {fallbackStatus && fallbackStatus !== 'error' ? (
             <Text style={styles.fallbackText}>
               {FALLBACK_LABEL[fallbackStatus]}
             </Text>
@@ -273,6 +282,12 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   artist: {color: '#9a9aa8', fontSize: 16, marginTop: 8, textAlign: 'center'},
+  errorText: {
+    color: '#e08a8a',
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 12,
+  },
   vibeSection: {marginBottom: 24},
   modeRow: {
     flexDirection: 'row',

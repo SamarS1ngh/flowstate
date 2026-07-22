@@ -39,6 +39,16 @@ export default function PlaylistScreen({route, navigation}: Props) {
   const [db, setDb] = useState<VibesDb | null>(null);
   const [vibeMode, setVibeMode] = useState(false);
   const [startingId, setStartingId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Brief, auto-dismissing in-screen notice (no toast dependency in this
+  // app) -- currently only used for the "vibe ON but this song isn't
+  // analyzed yet" fallback below.
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 2500);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,6 +100,12 @@ export default function PlaylistScreen({route, navigation}: Props) {
         });
         await playFrom(queue, seed.song);
       } else {
+        if (vibeMode && !seed) {
+          // Vibe mode is ON, but this particular song has no analysis data
+          // -- the SimpleQueue fallback below is silent otherwise, which
+          // reads as vibe mode randomly "not working" for some songs.
+          setNotice('Song not analyzed yet — normal queue');
+        }
         await playFrom(new SimpleQueue(songs, index), song);
       }
       navigation.navigate('Player');
@@ -135,6 +151,11 @@ export default function PlaylistScreen({route, navigation}: Props) {
           thumbColor="#f2f2f5"
         />
       </View>
+      {notice ? (
+        <View style={styles.noticeBanner}>
+          <Text style={styles.noticeText}>{notice}</Text>
+        </View>
+      ) : null}
       <FlatList
         style={styles.list}
         contentContainerStyle={styles.listContent}
@@ -184,6 +205,14 @@ const styles = StyleSheet.create({
     marginRight: 10,
   },
   vibeHeaderBadge: {color: '#6f6f7d', fontSize: 13},
+  noticeBanner: {
+    backgroundColor: '#15151c',
+    paddingVertical: 8,
+    paddingHorizontal: 20,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#26262f',
+  },
+  noticeText: {color: '#9a9aa8', fontSize: 12, textAlign: 'center'},
   list: {flex: 1, backgroundColor: '#0b0b0f'},
   listContent: {paddingVertical: 8},
   center: {

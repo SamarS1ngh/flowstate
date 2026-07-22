@@ -14,7 +14,10 @@ let current: Song | null = null;
 // touching it elsewhere means it always reflects the outcome of whichever
 // next() call produced the track that's currently loaded -- PlayerScreen
 // reads it via consumeFallbackStatus() after each track-changed event.
-export type FallbackKind = 'relaxed' | 'random';
+// 'error' is reported by skipToNext itself (not a VibeQueue fallback) when
+// the consecutive-failure cap below is hit -- reuses this same seam so
+// PlayerScreen doesn't need a second status channel.
+export type FallbackKind = 'relaxed' | 'random' | 'error';
 let lastFallback: FallbackKind | null = null;
 
 export function reportFallback(kind: FallbackKind): void {
@@ -55,16 +58,35 @@ export async function playFrom(src: QueueSource, first: Song): Promise<void> {
   await load(first);
 }
 
+// Safety cap for the retry-on-unplayable loop below. Without it, an offline
+// device (every resolveStreamUrl() call in load() fails) combined with a
+// QueueSource whose next() never runs out of candidates -- VibeQueue's
+// random fallback keeps returning songs indefinitely since a failed load
+// doesn't session-ban the song, and it allows repeats once the scope is
+// exhausted -- turns into an infinite loop of failed loads. Capping
+// consecutive failures bounds that to a handful of quick attempts before
+// surfacing an error instead of hanging.
+const MAX_CONSECUTIVE_LOAD_FAILURES = 5;
+
 export async function skipToNext(): Promise<void> {
   if (!source) return;
   lastFallback = null;
   let candidate = source.next(current);
+  let consecutiveFailures = 0;
   while (candidate) {
     try {
       await load(candidate);
       return;
     } catch {
       lastFallback = null;
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_LOAD_FAILURES) {
+        await TrackPlayer.stop();
+        // Reuses the fallback-status seam so PlayerScreen can show
+        // "playback failed -- check connection" without a second channel.
+        lastFallback = 'error';
+        return;
+      }
       candidate = source.next(candidate); // unplayable song: skip forward
     }
   }

@@ -126,12 +126,31 @@ function appDbPath(): string {
   return `${RNFS.DocumentDirectoryPath}/${DB_FILENAME}`;
 }
 
+const IMPORTING_FILENAME = `${DB_FILENAME}.importing`;
+
+function importingPath(): string {
+  return `${RNFS.DocumentDirectoryPath}/${IMPORTING_FILENAME}`;
+}
+
+// Validates a candidate vibes.db entirely out-of-place (a `.importing`
+// sidecar file, never the live vibes.db) before it's ever allowed to touch
+// the working library. Previously this copied straight over the live
+// vibes.db and only unlinked it on failure -- which meant a bad or corrupt
+// re-import destroyed a perfectly good existing library. Now a failed
+// candidate only ever costs the temp file; the existing db is never opened,
+// closed, or removed until the new one has already proven valid.
 export async function importVibesDb(sourcePath: string): Promise<void> {
   const dest = appDbPath();
-  await RNFS.copyFile(sourcePath, dest);
+  const temp = importingPath();
+
+  // Clear out any leftover temp file from a previous crashed/aborted import
+  // before starting, so copyFile below always starts from a clean slate.
+  await RNFS.unlink(temp).catch(() => {});
+  await RNFS.copyFile(sourcePath, temp);
+
   let db: DB | undefined;
   try {
-    db = open({name: DB_FILENAME, location: RNFS.DocumentDirectoryPath});
+    db = open({name: IMPORTING_FILENAME, location: RNFS.DocumentDirectoryPath});
     const res = db.executeSync(
       `SELECT value FROM meta WHERE key = 'schema_version'`,
     );
@@ -143,10 +162,29 @@ export async function importVibesDb(sourcePath: string): Promise<void> {
     }
   } catch (e) {
     db?.close();
-    await RNFS.unlink(dest).catch(() => {});
+    // Candidate is bad: clean up only the temp file. The existing, working
+    // vibes.db (if any) was never touched, so this can't brick the library.
+    await RNFS.unlink(temp).catch(() => {});
     throw e instanceof Error ? e : new Error('vibes.db is not a valid database file');
   }
   db.close();
+
+  // Candidate validated -- safe to swap it in. Stale -wal/-shm sidecar
+  // files from the *previous* vibes.db must go first: if left behind (e.g.
+  // the app was killed mid-write), SQLite's WAL recovery would otherwise
+  // replay them against the new file's contents on next open, corrupting it.
+  await RNFS.unlink(`${dest}-wal`).catch(() => {});
+  await RNFS.unlink(`${dest}-shm`).catch(() => {});
+
+  try {
+    // On Android this is an atomic rename (overwrites dest in place). Some
+    // platforms' move implementations refuse to overwrite an existing
+    // destination or fail across storage volumes, hence the fallback below.
+    await RNFS.moveFile(temp, dest);
+  } catch {
+    await RNFS.copyFile(temp, dest);
+    await RNFS.unlink(temp).catch(() => {});
+  }
 }
 
 export async function openVibesDb(): Promise<VibesDb | null> {
