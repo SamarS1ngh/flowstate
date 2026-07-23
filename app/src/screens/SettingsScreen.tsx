@@ -11,12 +11,11 @@ import {
 } from 'react-native';
 import * as RNFS from '@dr.pogodin/react-native-fs';
 import {pick, keepLocalCopy, types} from '@react-native-documents/picker';
-import CookieManager from '@react-native-cookies/cookies';
 import {useFocusEffect} from '@react-navigation/native';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
 import {importVibesDb} from '../db/vibesDb';
-import {clearAuth, loadAuth} from '../auth/authStore';
+import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
@@ -31,9 +30,13 @@ export default function SettingsScreen({navigation}: Props) {
     useCallback(() => {
       let cancelled = false;
       (async () => {
-        const cookieHeader = await loadAuth();
+        // OAuth device-flow credentials (flowstate.oauth.v1) are the
+        // source of truth for login state now; the cookie-paste fallback
+        // (flowstate.auth.v1, still cleared below on logout) is a hidden
+        // secondary path and doesn't drive this row's display.
+        const creds = await loadOAuthCreds();
         if (!cancelled) {
-          setLoggedIn(cookieHeader != null);
+          setLoggedIn(creds != null);
           setAuthChecked(true);
         }
       })();
@@ -46,9 +49,10 @@ export default function SettingsScreen({navigation}: Props) {
   const onLogout = async () => {
     setLoggingOut(true);
     try {
+      await clearOAuthCreds();
       await clearAuth();
-      await CookieManager.clearAll();
       setLoggedIn(false);
+      Alert.alert('Logged out', 'You have been signed out of YouTube Music.');
     } catch (e) {
       Alert.alert(
         'Logout failed',
@@ -138,9 +142,7 @@ export default function SettingsScreen({navigation}: Props) {
           <ActivityIndicator color="#5b8def" />
         ) : loggedIn ? (
           <>
-            <Text style={styles.sectionBody}>
-              Logged in as YouTube user.
-            </Text>
+            <Text style={styles.sectionBody}>Logged in ✓</Text>
             <Pressable
               style={[styles.button, loggingOut && styles.buttonDisabled]}
               disabled={loggingOut}

@@ -6,6 +6,7 @@ import {sha1} from 'js-sha1';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const STORAGE_KEY = 'flowstate.auth.v1';
+const OAUTH_STORAGE_KEY = 'flowstate.oauth.v1';
 const MUSIC_ORIGIN = 'https://music.youtube.com';
 
 /**
@@ -90,4 +91,42 @@ export async function loadAuth(): Promise<string | null> {
 /** Clears the persisted cookie header (used on logout). */
 export async function clearAuth(): Promise<void> {
   await AsyncStorage.removeItem(STORAGE_KEY);
+}
+
+// --- OAuth device-flow credentials (Plan C Task 2) ---------------------
+//
+// The cookie-based functions above stay as-is (cookie-paste remains a
+// hidden fallback -- see LoginScreen). Device-code OAuth persists a
+// completely different shape: youtubei.js's `OAuth2Tokens` object
+// (access_token/refresh_token/expiry_date/scope/token_type/client), read
+// straight off the `credentials` field of the session's 'auth' and
+// 'update-credentials' events (see src/auth/oauth.ts) and later handed
+// back to `session.signIn(creds)` verbatim to restore a session. Stored as
+// opaque JSON under its own key so it never collides with, or needs to be
+// parsed like, the cookie header string.
+
+/** Persists an OAuth credentials object (JSON-serializable) to AsyncStorage. */
+export async function saveOAuthCreds(creds: object): Promise<void> {
+  await AsyncStorage.setItem(OAUTH_STORAGE_KEY, JSON.stringify(creds));
+}
+
+/**
+ * Loads the previously-persisted OAuth credentials object, or null if none
+ * is stored (or the stored value is corrupt JSON -- treated the same as
+ * "not logged in" rather than throwing, since callers use this purely to
+ * decide whether to attempt a session restore).
+ */
+export async function loadOAuthCreds(): Promise<object | null> {
+  const raw = await AsyncStorage.getItem(OAUTH_STORAGE_KEY);
+  if (raw == null) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Clears the persisted OAuth credentials (used on logout). */
+export async function clearOAuthCreds(): Promise<void> {
+  await AsyncStorage.removeItem(OAUTH_STORAGE_KEY);
 }

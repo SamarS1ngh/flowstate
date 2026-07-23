@@ -1,43 +1,18 @@
-// In-app YouTube Music login. Loads music.youtube.com in a WebView and lets
-// the user sign in with their own Google credentials (this screen never
-// sees or handles the password itself -- it only watches cookies that the
-// browser engine sets after Google's own login flow completes).
+// In-app YouTube login: the WebView credential-entry flow this screen used
+// to show has been replaced with youtubei.js's OAuth device-code ("smart
+// TV") flow (see src/auth/oauth.ts for the full rationale and the
+// youtubei.js API this wraps). Google blocks the disguised WebView at
+// credential entry ("Couldn't sign you in -- browser may not be secure"),
+// so this screen never touches Google's login page at all: it shows a
+// short code and a URL, the user approves the code on ANY already-signed-in
+// browser (phone, laptop, doesn't matter), and youtubei.js's session picks
+// up full credentials the moment that approval completes.
 //
-// Detection strategy: after each WebView navigation event (and on a short
-// poll while the WebView is settled) we read all cookies for
-// https://music.youtube.com via @react-native-cookies/cookies. Android's
-// native CookieManager.getCookie() returns the FULL cookie jar for the URL,
-// including HttpOnly cookies (SAPISID/__Secure-* are httpOnly and are NOT
-// visible to injected `document.cookie` JS -- that's exactly why we use the
-// native cookies lib rather than injectedJavaScript). Login is considered
-// complete once both:
-//   - a SAPISID-family cookie exists (SAPISID or __Secure-3PAPISID) --
-//     required by authStore.buildAuthHeaders to compute SAPISIDHASH, and
-//   - a session cookie exists (SID, __Secure-1PSID or __Secure-3PSID) --
-//     confirms an actual signed-in session, not just a pre-login CONSENT/
-//     VISITOR_INFO1_LIVE jar.
-// On success we assemble a `name=value; name2=value2; ...` cookie header
-// (the form authStore.parseCookieString expects -- NOT a raw Set-Cookie
-// string) from ALL cookies returned for the domain, validate it by calling
-// buildAuthHeaders (throws if SAPISID is somehow missing), persist it via
-// saveAuth, and navigate to Library.
-//
-// A manual "Done / I'm logged in" button is provided as a fallback trigger
-// in case navigation-state events don't fire an extra check right after the
-// user finishes the Google login redirect chain (e.g. if the WebView lands
-// on a page that doesn't itself trigger onNavigationStateChange again).
-//
-// Fallback B -- cookie paste: Google sometimes blocks the disguised WebView
-// anyway (the UA/heuristic check is not guaranteed to pass forever, and some
-// accounts/regions trigger extra verification steps that don't render well
-// in a WebView at all). A "Paste cookie instead" toggle switches this screen
-// to a plain TextInput where the user pastes a `Cookie:` header copied from
-// their desktop browser's devtools (Network tab -> any music.youtube.com
-// request -> Copy -> Copy as cURL or Copy request headers -> the `cookie:`
-// line). This goes through the exact same buildAuthHeaders/saveAuth
-// validation path as the WebView flow, so it's a strict superset guarantee:
-// login works even if the WebView path is fully blocked.
-import React, {useCallback, useRef, useState} from 'react';
+// Cookie-paste (Task 1's WebView-adjacent fallback) is kept as a hidden
+// "Trouble signing in?" link -- it's a strict superset guarantee in case
+// device-code sign-in is ever unavailable (e.g. a future policy change),
+// even though it's no longer the primary/expected path.
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -49,104 +24,100 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import {WebView, WebViewNavigation} from 'react-native-webview';
-import CookieManager from '@react-native-cookies/cookies';
+// react-native core's Clipboard is deprecated in favor of
+// @react-native-clipboard/clipboard, but it's still present and functional
+// (a thin TurboModule wrapper) and avoids adding a new native dependency
+// just for a "Copy code" button; it only warns once via warnOnce, which is
+// harmless here.
+// eslint-disable-next-line deprecation/deprecation
+import {Clipboard} from 'react-native';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
 import {buildAuthHeaders, saveAuth} from './authStore';
+import {describeAuthError, startDeviceLogin} from './oauth';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Login'>;
 
-const MUSIC_URL = 'https://music.youtube.com';
-// accounts.google.com's own login flow sets SAPISID/SID on the .google.com
-// domain; because that flow happens as top-level navigation inside the same
-// WebView (not a genuinely cross-site third-party context), Android's
-// CookieManager stores it under the .google.com domain rather than
-// music.youtube.com. We read both URLs' cookie jars and merge them so we
-// pick up SAPISID/SID regardless of which domain Google chose to set it on.
-const GOOGLE_URL = 'https://www.google.com';
+// device-code flows expire (expires_in from the device/code endpoint is
+// ~30 minutes as of this writing) -- if nothing has happened by then,
+// youtubei.js emits 'auth-error' and startDeviceLogin's promise rejects,
+// which is surfaced through the normal error/retry UI below rather than a
+// separate timeout path.
 
-// A current desktop Chrome UA. YouTube/Google's login flow rejects
-// unrecognized or stale mobile/embedded UAs (shows the
-// "This browser or app may not be secure" block page), so we present as a
-// recent desktop Chrome on Windows rather than the WebView's default UA.
-const DESKTOP_CHROME_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-  '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
-
-const SAPISID_KEYS = ['SAPISID', '__Secure-3PAPISID'];
-const SESSION_KEYS = ['SID', '__Secure-1PSID', '__Secure-3PSID'];
+type FlowState =
+  | {phase: 'starting'}
+  | {phase: 'code-ready'; url: string; code: string}
+  | {phase: 'success'}
+  | {phase: 'error'; message: string};
 
 export default function LoginScreen({navigation}: Props) {
-  const [checking, setChecking] = useState(false);
-  const [mode, setMode] = useState<'webview' | 'paste'>('webview');
+  const [mode, setMode] = useState<'device' | 'paste'>('device');
+  const [flow, setFlow] = useState<FlowState>({phase: 'starting'});
+  const [copied, setCopied] = useState(false);
   const [pastedCookie, setPastedCookie] = useState('');
   const [pasteError, setPasteError] = useState<string | null>(null);
   const [submittingPaste, setSubmittingPaste] = useState(false);
-  const completedRef = useRef(false);
+  // Guards against starting a second concurrent device-code flow -- e.g.
+  // React's Strict Mode double-invoking effects in dev, or the user
+  // toggling to "paste cookie" and back before the first flow settled.
+  const startedRef = useRef(false);
+  // Guards against setState after this screen has already navigated away
+  // (navigation.replace unmounts it, but the login promise's .then/.catch
+  // can still fire after that if it settles right around the same tick).
+  const mountedRef = useRef(true);
 
-  const tryCompleteLogin = useCallback(
-    async (silent: boolean) => {
-      if (completedRef.current) return;
-      setChecking(true);
-      try {
-        const [musicCookies, googleCookies] = await Promise.all([
-          CookieManager.get(MUSIC_URL, true),
-          CookieManager.get(GOOGLE_URL, true),
-        ]);
-        // Merge with music.youtube.com winning on name collisions (it's the
-        // origin we actually authenticate against for the origin-bound
-        // SAPISIDHASH computation).
-        const merged: Record<string, {name: string; value: string}> = {
-          ...googleCookies,
-          ...musicCookies,
-        };
-        const haveSapisid = SAPISID_KEYS.some(k => !!merged[k]?.value);
-        const haveSession = SESSION_KEYS.some(k => !!merged[k]?.value);
-        if (!haveSapisid || !haveSession) {
-          if (!silent) {
-            Alert.alert(
-              'Not signed in yet',
-              'Finish signing in to your Google account in the page above, then tap this button again.',
-            );
-          }
-          return;
-        }
-        const joined = Object.values(merged)
-          .map(c => `${c.name}=${c.value}`)
-          .join('; ');
-        // Validate before persisting -- throws if SAPISID is somehow
-        // missing from the joined header (shouldn't happen given the
-        // haveSapisid check above, but this keeps saveAuth() from ever
-        // storing a header buildAuthHeaders can't use).
-        buildAuthHeaders(joined, Date.now());
-        await saveAuth(joined);
-        completedRef.current = true;
+  const beginDeviceLogin = useCallback(() => {
+    startedRef.current = true;
+    setFlow({phase: 'starting'});
+    setCopied(false);
+    startDeviceLogin((url, code) => {
+      if (!mountedRef.current) return;
+      setFlow({phase: 'code-ready', url, code});
+    })
+      .then(() => {
+        if (!mountedRef.current) return;
+        setFlow({phase: 'success'});
         navigation.replace('Library');
-      } catch (e) {
-        if (!silent) {
-          Alert.alert(
-            'Login check failed',
-            e instanceof Error ? e.message : 'Unknown error',
-          );
-        }
-      } finally {
-        setChecking(false);
-      }
-    },
-    [navigation],
-  );
+      })
+      .catch(err => {
+        if (!mountedRef.current) return;
+        setFlow({phase: 'error', message: describeAuthError(err)});
+      });
+  }, [navigation]);
 
-  const onNavigationStateChange = useCallback(
-    (navState: WebViewNavigation) => {
-      if (navState.loading) return;
-      // Fire-and-forget: a silent check after every settled navigation so
-      // login is detected automatically as soon as YT Music redirects back
-      // from the Google accounts flow, without requiring the manual button.
-      tryCompleteLogin(true);
-    },
-    [tryCompleteLogin],
-  );
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (mode === 'device' && !startedRef.current) {
+      beginDeviceLogin();
+    }
+  }, [mode, beginDeviceLogin]);
+
+  const onRetry = useCallback(() => {
+    startedRef.current = false;
+    beginDeviceLogin();
+  }, [beginDeviceLogin]);
+
+  const onCopyCode = useCallback(() => {
+    if (flow.phase !== 'code-ready') return;
+    Clipboard.setString(flow.code);
+    setCopied(true);
+  }, [flow]);
+
+  const onOpenVerificationUrl = useCallback(() => {
+    if (flow.phase !== 'code-ready') return;
+    Linking.openURL(flow.url).catch(() => {
+      Alert.alert(
+        'Could not open browser',
+        `Open ${flow.url} manually and enter the code shown.`,
+      );
+    });
+  }, [flow]);
 
   const onSubmitPastedCookie = useCallback(async () => {
     setPasteError(null);
@@ -158,10 +129,9 @@ export default function LoginScreen({navigation}: Props) {
     setSubmittingPaste(true);
     try {
       // Validates (throws if no SAPISID/__Secure-3PAPISID present) before
-      // ever persisting anything, same guarantee as the WebView path.
+      // ever persisting anything, same guarantee as the device-code path.
       buildAuthHeaders(trimmed, Date.now());
       await saveAuth(trimmed);
-      completedRef.current = true;
       navigation.replace('Library');
     } catch (e) {
       setPasteError(e instanceof Error ? e.message : 'Unknown error');
@@ -174,39 +144,77 @@ export default function LoginScreen({navigation}: Props) {
     <View style={styles.container}>
       <View style={styles.modeSwitch}>
         <Pressable
-          onPress={() => setMode(mode === 'webview' ? 'paste' : 'webview')}>
+          onPress={() => setMode(mode === 'device' ? 'paste' : 'device')}>
           <Text style={styles.modeSwitchText}>
-            {mode === 'webview'
-              ? "Trouble signing in? Paste cookie instead"
-              : "Back to sign-in page"}
+            {mode === 'device'
+              ? 'Trouble signing in? Paste cookie instead'
+              : 'Back to sign-in code'}
           </Text>
         </Pressable>
       </View>
-      {mode === 'webview' ? (
-        <>
-          <WebView
-            source={{uri: MUSIC_URL}}
-            userAgent={DESKTOP_CHROME_UA}
-            onNavigationStateChange={onNavigationStateChange}
-            sharedCookiesEnabled
-            thirdPartyCookiesEnabled
-            domStorageEnabled
-            javaScriptEnabled
-            style={styles.webview}
-          />
-          <View style={styles.footer}>
-            <Pressable
-              style={[styles.button, checking && styles.buttonDisabled]}
-              disabled={checking}
-              onPress={() => tryCompleteLogin(false)}>
-              {checking ? (
-                <ActivityIndicator color="#0b0b0f" />
-              ) : (
-                <Text style={styles.buttonText}>Done / I'm logged in</Text>
-              )}
-            </Pressable>
-          </View>
-        </>
+      {mode === 'device' ? (
+        <ScrollView
+          style={styles.deviceContainer}
+          contentContainerStyle={styles.deviceContent}>
+          <Text style={styles.title}>Sign in with a code</Text>
+          <Text style={styles.subtitle}>
+            Enter this code at{' '}
+            <Text style={styles.subtitleStrong}>google.com/device</Text> on
+            any browser where you're already signed in to your Google
+            account -- your phone, a laptop, anything.
+          </Text>
+
+          {flow.phase === 'starting' && (
+            <View style={styles.codeBox}>
+              <ActivityIndicator color="#5b8def" />
+              <Text style={styles.codePending}>Getting your code…</Text>
+            </View>
+          )}
+
+          {flow.phase === 'code-ready' && (
+            <>
+              <View style={styles.codeBox} testID="device-code-box">
+                <Text style={styles.code} testID="device-code-text">
+                  {flow.code}
+                </Text>
+                <Text style={styles.url}>{flow.url}</Text>
+              </View>
+              <Pressable style={styles.button} onPress={onOpenVerificationUrl}>
+                <Text style={styles.buttonText}>
+                  Open {flow.url.replace('https://', '')}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.button, styles.secondaryButton]}
+                onPress={onCopyCode}>
+                <Text style={styles.secondaryButtonText}>
+                  {copied ? 'Copied!' : 'Copy code'}
+                </Text>
+              </Pressable>
+              <View style={styles.waitingRow}>
+                <ActivityIndicator color="#5b8def" size="small" />
+                <Text style={styles.waitingText}>
+                  Waiting for you to approve on the other device…
+                </Text>
+              </View>
+            </>
+          )}
+
+          {flow.phase === 'success' && (
+            <View style={styles.codeBox}>
+              <Text style={styles.codePending}>Signed in ✓</Text>
+            </View>
+          )}
+
+          {flow.phase === 'error' && (
+            <View style={styles.codeBox}>
+              <Text style={styles.errorText}>{flow.message}</Text>
+              <Pressable style={styles.button} onPress={onRetry}>
+                <Text style={styles.buttonText}>Retry</Text>
+              </Pressable>
+            </View>
+          )}
+        </ScrollView>
       ) : (
         <ScrollView
           style={styles.pasteContainer}
@@ -242,10 +250,7 @@ export default function LoginScreen({navigation}: Props) {
             <Text style={styles.pasteError}>{pasteError}</Text>
           ) : null}
           <Pressable
-            style={[
-              styles.button,
-              submittingPaste && styles.buttonDisabled,
-            ]}
+            style={[styles.button, submittingPaste && styles.buttonDisabled]}
             disabled={submittingPaste}
             onPress={onSubmitPastedCookie}>
             {submittingPaste ? (
@@ -262,7 +267,6 @@ export default function LoginScreen({navigation}: Props) {
 
 const styles = StyleSheet.create({
   container: {flex: 1, backgroundColor: '#0b0b0f'},
-  webview: {flex: 1, backgroundColor: '#0b0b0f'},
   modeSwitch: {
     paddingHorizontal: 16,
     paddingVertical: 10,
@@ -271,20 +275,69 @@ const styles = StyleSheet.create({
     borderBottomColor: '#26262f',
   },
   modeSwitchText: {color: '#5b8def', fontSize: 13, fontWeight: '600'},
-  footer: {
-    padding: 16,
-    backgroundColor: '#15151c',
-    borderTopWidth: 1,
-    borderTopColor: '#26262f',
+  deviceContainer: {flex: 1, backgroundColor: '#0b0b0f'},
+  deviceContent: {padding: 20, alignItems: 'center'},
+  title: {
+    color: '#f2f2f5',
+    fontSize: 22,
+    fontWeight: '700',
+    marginTop: 12,
+    marginBottom: 8,
+    textAlign: 'center',
   },
+  subtitle: {
+    color: '#9a9aa8',
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+    marginBottom: 24,
+  },
+  subtitleStrong: {color: '#c8c8d2', fontWeight: '600'},
+  codeBox: {
+    width: '100%',
+    backgroundColor: '#15151c',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#26262f',
+    paddingVertical: 28,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  code: {
+    color: '#f2f2f5',
+    fontSize: 40,
+    fontWeight: '800',
+    letterSpacing: 4,
+    marginBottom: 12,
+  },
+  url: {color: '#5b8def', fontSize: 16, fontWeight: '600'},
+  codePending: {color: '#c8c8d2', fontSize: 15, marginTop: 12},
+  errorText: {
+    color: '#ef5b5b',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  waitingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 8,
+  },
+  waitingText: {color: '#9a9aa8', fontSize: 13, marginLeft: 10},
   button: {
+    width: '100%',
     backgroundColor: '#5b8def',
     paddingVertical: 12,
     borderRadius: 8,
     alignItems: 'center',
+    marginBottom: 12,
   },
   buttonDisabled: {opacity: 0.6},
   buttonText: {color: '#0b0b0f', fontSize: 16, fontWeight: '600'},
+  secondaryButton: {backgroundColor: '#26262f'},
+  secondaryButtonText: {color: '#f2f2f5', fontSize: 16, fontWeight: '600'},
   pasteContainer: {flex: 1, backgroundColor: '#0b0b0f'},
   pasteContent: {padding: 16},
   pasteInstructions: {
