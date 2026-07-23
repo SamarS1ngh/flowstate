@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useCallback, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -11,15 +11,53 @@ import {
 } from 'react-native';
 import * as RNFS from '@dr.pogodin/react-native-fs';
 import {pick, keepLocalCopy, types} from '@react-native-documents/picker';
+import CookieManager from '@react-native-cookies/cookies';
+import {useFocusEffect} from '@react-navigation/native';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
 import {importVibesDb} from '../db/vibesDb';
+import {clearAuth, loadAuth} from '../auth/authStore';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
 export default function SettingsScreen({navigation}: Props) {
   const [importingFile, setImportingFile] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [loggedIn, setLoggedIn] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      (async () => {
+        const cookieHeader = await loadAuth();
+        if (!cancelled) {
+          setLoggedIn(cookieHeader != null);
+          setAuthChecked(true);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }, []),
+  );
+
+  const onLogout = async () => {
+    setLoggingOut(true);
+    try {
+      await clearAuth();
+      await CookieManager.clearAll();
+      setLoggedIn(false);
+    } catch (e) {
+      Alert.alert(
+        'Logout failed',
+        e instanceof Error ? e.message : 'Unknown error',
+      );
+    } finally {
+      setLoggingOut(false);
+    }
+  };
   // No baked-in default IP -- every user's LAN address is different, so a
   // hardcoded value here would either be silently wrong (most users) or, if
   // ever left untouched, quietly point the app at someone else's machine.
@@ -94,6 +132,40 @@ export default function SettingsScreen({navigation}: Props) {
     <ScrollView
       style={styles.container}
       contentContainerStyle={styles.content}>
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>YouTube Music account</Text>
+        {!authChecked ? (
+          <ActivityIndicator color="#5b8def" />
+        ) : loggedIn ? (
+          <>
+            <Text style={styles.sectionBody}>
+              Logged in as YouTube user.
+            </Text>
+            <Pressable
+              style={[styles.button, loggingOut && styles.buttonDisabled]}
+              disabled={loggingOut}
+              onPress={onLogout}>
+              {loggingOut ? (
+                <ActivityIndicator color="#0b0b0f" />
+              ) : (
+                <Text style={styles.buttonText}>Logout</Text>
+              )}
+            </Pressable>
+          </>
+        ) : (
+          <>
+            <Text style={styles.sectionBody}>
+              Log in to sync your playlists and play login-gated songs.
+            </Text>
+            <Pressable
+              style={styles.button}
+              onPress={() => navigation.navigate('Login')}>
+              <Text style={styles.buttonText}>Log in to YouTube Music</Text>
+            </Pressable>
+          </>
+        )}
+      </View>
+
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Import vibes.db from file</Text>
         <Text style={styles.sectionBody}>

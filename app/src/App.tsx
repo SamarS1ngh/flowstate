@@ -10,6 +10,7 @@ import LibraryScreen from './screens/LibraryScreen';
 import PlaylistScreen from './screens/PlaylistScreen';
 import PlayerScreen from './screens/PlayerScreen';
 import SettingsScreen from './screens/SettingsScreen';
+import LoginScreen from './auth/LoginScreen';
 import {openVibesDb} from './db/vibesDb';
 import {FeedbackStore} from './engine/feedbackStore';
 
@@ -18,6 +19,7 @@ export type RootStackParamList = {
   Playlist: {playlistId: string | 'ALL'; playlistName: string};
   Player: undefined;
   Settings: undefined;
+  Login: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -153,6 +155,11 @@ export default function App() {
         />
         <Stack.Screen name="Player" component={PlayerScreen} />
         <Stack.Screen name="Settings" component={SettingsScreen} />
+        <Stack.Screen
+          name="Login"
+          component={LoginScreen}
+          options={{title: 'Log in to YouTube Music'}}
+        />
       </Stack.Navigator>
     </NavigationContainer>
   );
