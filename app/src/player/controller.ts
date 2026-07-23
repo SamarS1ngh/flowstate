@@ -32,17 +32,18 @@ export function consumeFallbackStatus(): FallbackKind | null {
 
 async function load(song: Song): Promise<void> {
   // retry-once semantics per design: fresh extraction on first failure, then skip
-  let url: string;
+  let stream: {url: string; headers?: Record<string, string>};
   try {
-    url = await resolveStreamUrl(song.videoId);
+    stream = await resolveStreamUrl(song.videoId);
   } catch (e) {
     if (!(e instanceof StreamResolveError)) throw e;
-    url = await resolveStreamUrl(song.videoId); // second attempt
+    stream = await resolveStreamUrl(song.videoId); // second attempt
   }
   await TrackPlayer.reset();
   await TrackPlayer.add({
     id: song.videoId,
-    url,
+    url: stream.url,
+    headers: stream.headers,
     title: song.title,
     artist: song.artist,
     duration: song.durationS ?? undefined,

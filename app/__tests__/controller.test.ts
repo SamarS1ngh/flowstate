@@ -104,7 +104,7 @@ describe('skipToNext: offline consecutive-failure cap', () => {
       // load succeeds -- the retry-on-unplayable path should still recover
       // normally rather than being short-circuited by the new cap.
       if (calls < 3) return Promise.reject(new Error('network unreachable'));
-      return Promise.resolve('https://example.com/stream.mp3');
+      return Promise.resolve({url: 'https://example.com/stream.mp3', headers: {}});
     });
 
     await skipToNext();
