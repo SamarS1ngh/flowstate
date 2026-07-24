@@ -1,7 +1,15 @@
-import React, {useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {PermissionsAndroid, Platform, StyleSheet, Text, View} from 'react-native';
-import {DarkTheme, NavigationContainer} from '@react-navigation/native';
+import {
+  createNavigationContainerRef,
+  DarkTheme,
+  NavigationContainer,
+} from '@react-navigation/native';
 import {createNativeStackNavigator} from '@react-navigation/native-stack';
+import {
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 import TrackPlayer, {
   Capability,
   AppKilledPlaybackBehavior,
@@ -13,6 +21,9 @@ import SettingsScreen from './screens/SettingsScreen';
 import LoginScreen from './auth/LoginScreen';
 import {openVibesDb} from './db/vibesDb';
 import {FeedbackStore} from './engine/feedbackStore';
+import BottomNav, {BottomNavKey} from './ui/BottomNav';
+import MiniPlayer from './ui/MiniPlayer';
+import {colors} from './ui/theme';
 
 export type RootStackParamList = {
   Library: undefined;
@@ -24,16 +35,25 @@ export type RootStackParamList = {
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
+const navigationRef = createNavigationContainerRef<RootStackParamList>();
+
+// Routes where the persistent mini player / bottom nav shell (Task 3) should
+// NOT show: Player is the full now-playing screen the mini player expands
+// into (showing both would be redundant and would eat vertical space from
+// the transport row), and Login is a focused auth flow that shouldn't
+// suggest "you can navigate away, the tabs are still here".
+const SHELL_HIDDEN_ROUTES = new Set<keyof RootStackParamList>(['Player', 'Login']);
+
 const navTheme = {
   ...DarkTheme,
   colors: {
     ...DarkTheme.colors,
-    primary: '#5b8def',
-    background: '#0b0b0f',
-    card: '#15151c',
-    text: '#f2f2f5',
-    border: '#26262f',
-    notification: '#5b8def',
+    primary: colors.accent,
+    background: colors.bg,
+    card: colors.bg,
+    text: colors.textPrimary,
+    border: colors.border,
+    notification: colors.accent,
   },
 };
 
@@ -138,42 +158,101 @@ export default function App() {
     );
   }
   return (
-    <NavigationContainer theme={navTheme}>
-      <Stack.Navigator
-        screenOptions={{
-          headerStyle: {backgroundColor: '#15151c'},
-          headerTintColor: '#f2f2f5',
-          contentStyle: {backgroundColor: '#0b0b0f'},
-        }}>
-        <Stack.Screen name="Library" component={LibraryScreen} />
-        <Stack.Screen
-          name="Playlist"
-          component={PlaylistScreen}
-          options={({route}) => ({
-            title: route.params?.playlistName ?? 'Playlist',
-          })}
-        />
-        <Stack.Screen name="Player" component={PlayerScreen} />
-        <Stack.Screen name="Settings" component={SettingsScreen} />
-        <Stack.Screen
-          name="Login"
-          component={LoginScreen}
-          options={{title: 'Log in to YouTube Music'}}
-        />
-      </Stack.Navigator>
+    <SafeAreaProvider>
+      <AppShell />
+    </SafeAreaProvider>
+  );
+}
+
+// Persistent mini-player + bottom-nav shell (Task 3): mounted once here,
+// alongside the Stack.Navigator rather than inside any individual screen,
+// so it survives Library <-> Playlist navigation and only disappears on the
+// routes in SHELL_HIDDEN_ROUTES. Split out from App() so it can call
+// useSafeAreaInsets(), which requires being inside SafeAreaProvider.
+function AppShell() {
+  const insets = useSafeAreaInsets();
+  // Root screen is 'Library', so that's the correct initial value for the
+  // brief window between first render and NavigationContainer's first
+  // onStateChange call.
+  const [routeName, setRouteName] =
+    useState<keyof RootStackParamList>('Library');
+
+  const onNavStateChange = useCallback(() => {
+    if (!navigationRef.isReady()) return;
+    const name = navigationRef.getCurrentRoute()?.name;
+    if (name) setRouteName(name as keyof RootStackParamList);
+  }, []);
+
+  const navigateTab = useCallback((key: BottomNavKey) => {
+    if (navigationRef.isReady()) navigationRef.navigate(key);
+  }, []);
+
+  const openPlayer = useCallback(() => {
+    if (navigationRef.isReady()) navigationRef.navigate('Player');
+  }, []);
+
+  const showShell = !SHELL_HIDDEN_ROUTES.has(routeName);
+  // Only two real tab destinations exist (see BottomNav) -- every other
+  // route (Playlist, the pushed detail screen) still counts as "in the
+  // Library area" for which tab reads as active.
+  const activeTab: BottomNavKey = routeName === 'Settings' ? 'Settings' : 'Library';
+
+  return (
+    <NavigationContainer
+      ref={navigationRef}
+      theme={navTheme}
+      onStateChange={onNavStateChange}>
+      <View style={styles.root}>
+        <Stack.Navigator
+          screenOptions={{
+            headerStyle: {backgroundColor: colors.bg},
+            headerTintColor: colors.textPrimary,
+            headerShadowVisible: false,
+            contentStyle: {backgroundColor: colors.bg},
+          }}>
+          <Stack.Screen
+            name="Library"
+            component={LibraryScreen}
+            options={{headerShown: false}}
+          />
+          <Stack.Screen
+            name="Playlist"
+            component={PlaylistScreen}
+            options={{headerShown: false}}
+          />
+          <Stack.Screen
+            name="Player"
+            component={PlayerScreen}
+            options={{headerShown: false}}
+          />
+          <Stack.Screen name="Settings" component={SettingsScreen} />
+          <Stack.Screen
+            name="Login"
+            component={LoginScreen}
+            options={{title: 'Log in to YouTube Music'}}
+          />
+        </Stack.Navigator>
+        {showShell ? (
+          <View style={{paddingBottom: insets.bottom, backgroundColor: colors.bg}}>
+            <MiniPlayer onPress={openPlayer} />
+            <BottomNav active={activeTab} onNavigate={navigateTab} />
+          </View>
+        ) : null}
+      </View>
     </NavigationContainer>
   );
 }
 
 const styles = StyleSheet.create({
+  root: {flex: 1, backgroundColor: colors.bg},
   splash: {
     flex: 1,
-    backgroundColor: '#0b0b0f',
+    backgroundColor: colors.bg,
     alignItems: 'center',
     justifyContent: 'center',
   },
   splashText: {
-    color: '#f2f2f5',
+    color: colors.textPrimary,
     fontSize: 20,
     fontWeight: '600',
     letterSpacing: 1,

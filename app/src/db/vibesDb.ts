@@ -162,6 +162,44 @@ export class VibesDb {
     return res.rows.map(rowToVibeSong);
   }
 
+  // UI-only helper (Task: YT-Music-style redesign): one video id per
+  // playlist -- its earliest-position song -- keyed by playlist_id, for
+  // rendering a single-thumbnail cover on Library's playlist rows without
+  // an N+1 getPlaylistSongs() call per row. A plain JS object (not a Map)
+  // so callers can destructure/JSON it as easily as any other read here.
+  getPlaylistCoverVideoIds(): Record<string, string> {
+    const res = this.db.executeSync(
+      `SELECT ps.playlist_id, ps.video_id FROM playlist_songs ps
+       WHERE ps.position = (
+         SELECT MIN(position) FROM playlist_songs ps2
+         WHERE ps2.playlist_id = ps.playlist_id
+       )`,
+    );
+    const out: Record<string, string> = {};
+    for (const r of res.rows as any[]) out[r.playlist_id] = r.video_id;
+    return out;
+  }
+
+  // UI-only helper: up to `limit` video ids in playlist order (or library
+  // order for 'ALL'), for PlaylistScreen's header collage art. Intentionally
+  // separate from getPlaylistCoverVideoIds() above -- that one is a single
+  // batch query across every playlist for the Library list; this one is a
+  // single small query for the one playlist currently open.
+  getFirstVideoIds(playlistId: string | 'ALL', limit: number): string[] {
+    const res =
+      playlistId === 'ALL'
+        ? this.db.executeSync(
+            `SELECT video_id FROM songs ORDER BY artist, title LIMIT ?`,
+            [limit],
+          )
+        : this.db.executeSync(
+            `SELECT video_id FROM playlist_songs WHERE playlist_id = ?
+             ORDER BY position LIMIT ?`,
+            [playlistId, limit],
+          );
+    return res.rows.map((r: any) => r.video_id);
+  }
+
   // Raw handle so FeedbackStore (a thin op-sqlite adapter of its own) can
   // share the same open connection instead of re-opening vibes.db.
   get handle(): DB {

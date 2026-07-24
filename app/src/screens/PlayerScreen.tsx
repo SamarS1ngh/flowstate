@@ -1,6 +1,9 @@
 import React, {useCallback, useEffect, useReducer, useRef, useState} from 'react';
-import {Pressable, StyleSheet, Text, View} from 'react-native';
+import {ScrollView, StyleSheet, Text, View} from 'react-native';
+import {SafeAreaView} from 'react-native-safe-area-context';
+import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import {Event, State, useProgress, useTrackPlayerEvents, usePlaybackState} from 'react-native-track-player';
+import type {RootStackParamList} from '../App';
 import {
   currentSource,
   consumeFallbackStatus,
@@ -14,6 +17,13 @@ import {openVibesDb} from '../db/vibesDb';
 import {FeedbackStore} from '../engine/feedbackStore';
 import {VibeQueue} from '../engine/vibeQueue';
 import type {Song} from '../types';
+import Chip from '../ui/Chip';
+import CircleButton from '../ui/CircleButton';
+import IconButton from '../ui/IconButton';
+import Thumbnail from '../ui/Thumbnail';
+import {colors, spacing, thumbSize, type} from '../ui/theme';
+
+type Props = NativeStackScreenProps<RootStackParamList, 'Player'>;
 
 function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
@@ -37,12 +47,7 @@ const FALLBACK_LABEL: Record<FallbackKind, string> = {
   error: 'playback failed — check connection',
 };
 
-// TODO(device verification): no device/emulator was available while building
-// this screen. tsc + jest are clean, but the lock/drift toggle, mood chips,
-// "doesn't fit" flow, and the fallback status line have not been exercised
-// against a real vibes.db / TrackPlayer instance. Verify on-device before
-// relying on this for the release build (see Task 4).
-export default function PlayerScreen() {
+export default function PlayerScreen({navigation}: Props) {
   const [song, setSong] = useState<Song | null>(() => nowPlaying());
   const [selectedMood, setSelectedMood] = useState<string | null>(null);
   const [fallbackStatus, setFallbackStatus] = useState<FallbackKind | null>(null);
@@ -143,236 +148,176 @@ export default function PlayerScreen() {
 
   if (!song) {
     return (
-      <View style={styles.center}>
-        <Text style={styles.emptyText}>Nothing playing.</Text>
-      </View>
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+        <View style={styles.emptyTopBar}>
+          <IconButton name="chevronDown" size={26} onPress={() => navigation.goBack()} />
+        </View>
+        <View style={styles.center}>
+          <Text style={styles.emptyText}>Nothing playing.</Text>
+        </View>
+      </SafeAreaView>
     );
   }
 
   const isLock = src instanceof VibeQueue && src.label === 'vibe:lock';
 
   return (
-    <View style={styles.container}>
-      <View style={styles.info}>
-        <Text style={styles.title} numberOfLines={2}>
-          {song.title}
-        </Text>
-        <Text style={styles.artist} numberOfLines={1}>
-          {song.artist}
-        </Text>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+      <View style={styles.topBar}>
+        <IconButton name="chevronDown" size={26} onPress={() => navigation.goBack()} />
+        <IconButton name="menu" size={22} onPress={() => navigation.navigate('Settings')} />
       </View>
 
-      {fallbackStatus === 'error' ? (
-        // Surfaced regardless of vibe mode: skipToNext's consecutive-failure
-        // cap can fire for a plain SimpleQueue too (not just VibeQueue), so
-        // this banner isn't gated behind isVibe like the relaxed/random ones
-        // below.
-        <Text style={styles.errorText}>{FALLBACK_LABEL.error}</Text>
-      ) : null}
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}>
+        <View style={styles.artWrap}>
+          <Thumbnail videoId={song.videoId} size={thumbSize.player} radius={12} />
+        </View>
 
-      {isVibe ? (
-        <View style={styles.vibeSection}>
-          <View style={styles.modeRow}>
-            <Pressable
-              style={[styles.modeButton, isLock && styles.modeButtonActive]}
-              onPress={onToggleLockDrift}>
-              <Text
-                style={[
-                  styles.modeButtonText,
-                  isLock && styles.modeButtonTextActive,
-                ]}>
-                {isLock ? 'Lock' : 'Drift'}
-              </Text>
-            </Pressable>
-            <Pressable style={styles.rejectButton} onPress={onDoesntFit}>
-              <Text style={styles.rejectButtonText}>Doesn't fit</Text>
-            </Pressable>
-          </View>
+        <View style={styles.info}>
+          <Text style={styles.title} numberOfLines={2}>
+            {song.title}
+          </Text>
+          <Text style={styles.artist} numberOfLines={1}>
+            {song.artist}
+          </Text>
+        </View>
 
-          <View style={styles.chipRow}>
-            {MOOD_CHIPS.map(chip => {
-              const active = selectedMood === chip.key;
-              return (
-                <Pressable
+        {fallbackStatus === 'error' ? (
+          // Surfaced regardless of vibe mode: skipToNext's consecutive-failure
+          // cap can fire for a plain SimpleQueue too (not just VibeQueue), so
+          // this banner isn't gated behind isVibe like the relaxed/random ones
+          // below.
+          <Text style={styles.errorText}>{FALLBACK_LABEL.error}</Text>
+        ) : null}
+
+        {isVibe ? (
+          <View style={styles.vibeSection}>
+            <View style={styles.actionChipRow}>
+              <Chip
+                label={isLock ? '🔒 Lock' : '〜 Drift'}
+                active={isLock}
+                onPress={onToggleLockDrift}
+                tone="accent"
+              />
+              <Chip label="👎 Doesn't fit" active onPress={onDoesntFit} tone="danger" />
+            </View>
+
+            <View style={styles.chipRow}>
+              {MOOD_CHIPS.map(chip => (
+                <Chip
                   key={chip.key}
-                  style={[styles.chip, active && styles.chipActive]}
-                  onPress={() => onToggleMood(chip.key)}>
-                  <Text
-                    style={[styles.chipText, active && styles.chipTextActive]}>
-                    {chip.label}
-                  </Text>
-                </Pressable>
-              );
-            })}
+                  label={chip.label}
+                  active={selectedMood === chip.key}
+                  onPress={() => onToggleMood(chip.key)}
+                />
+              ))}
+            </View>
+
+            {fallbackStatus && fallbackStatus !== 'error' ? (
+              <Text style={styles.fallbackText}>{FALLBACK_LABEL[fallbackStatus]}</Text>
+            ) : null}
           </View>
+        ) : null}
 
-          {fallbackStatus && fallbackStatus !== 'error' ? (
-            <Text style={styles.fallbackText}>
-              {FALLBACK_LABEL[fallbackStatus]}
-            </Text>
-          ) : null}
+        <View style={styles.progressRow}>
+          <Text style={styles.time}>{formatTime(progress.position)}</Text>
+          <View style={styles.progressBarTrack}>
+            <View
+              style={[
+                styles.progressBarFill,
+                {
+                  width: `${
+                    progress.duration > 0
+                      ? Math.min(100, (progress.position / progress.duration) * 100)
+                      : 0
+                  }%`,
+                },
+              ]}
+            />
+          </View>
+          <Text style={styles.time}>{formatTime(progress.duration)}</Text>
         </View>
-      ) : null}
 
-      <View style={styles.progressRow}>
-        <Text style={styles.time}>{formatTime(progress.position)}</Text>
-        <View style={styles.progressBarTrack}>
-          <View
-            style={[
-              styles.progressBarFill,
-              {
-                width: `${
-                  progress.duration > 0
-                    ? Math.min(
-                        100,
-                        (progress.position / progress.duration) * 100,
-                      )
-                    : 0
-                }%`,
-              },
-            ]}
+        <View style={styles.controls}>
+          {/* "shuffle-vibe": mirrors the lock/drift chip above in transport-row
+              position (matches the reference app's shuffle-prev-play-next-repeat
+              layout) -- dimmed/inert when there's no vibe queue to toggle. */}
+          <IconButton
+            name="shuffle"
+            size={22}
+            color={isVibe ? (isLock ? colors.textTertiary : colors.accent) : colors.textTertiary}
+            disabled={!isVibe}
+            onPress={onToggleLockDrift}
           />
+          <IconButton name="previous" size={30} onPress={() => skipToPrevious()} />
+          <CircleButton
+            icon={isPlaying ? 'pause' : 'play'}
+            size={72}
+            onPress={() => togglePlayPause()}
+          />
+          <IconButton name="next" size={30} onPress={() => skipToNext()} />
+          {/* Repeat: decorative only -- no repeat-track/queue concept exists in
+              controller.ts/queue.ts, and this redesign doesn't invent new
+              playback logic. Rendered dimmed so it doesn't imply a working
+              toggle. */}
+          <IconButton name="repeat" size={22} color={colors.textTertiary} disabled />
         </View>
-        <Text style={styles.time}>{formatTime(progress.duration)}</Text>
-      </View>
-
-      <View style={styles.controls}>
-        <Pressable
-          style={styles.controlButton}
-          onPress={() => skipToPrevious()}
-          hitSlop={16}>
-          <Text style={styles.controlIcon}>⏮</Text>
-        </Pressable>
-        <Pressable
-          style={[styles.controlButton, styles.playButton]}
-          onPress={() => togglePlayPause()}
-          hitSlop={16}>
-          <Text style={styles.playIcon}>{isPlaying ? '⏸' : '▶'}</Text>
-        </Pressable>
-        <Pressable
-          style={styles.controlButton}
-          onPress={() => skipToNext()}
-          hitSlop={16}>
-          <Text style={styles.controlIcon}>⏭</Text>
-        </Pressable>
-      </View>
-    </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0b0b0f',
-    padding: 24,
-    justifyContent: 'center',
-  },
-  center: {
-    flex: 1,
-    backgroundColor: '#0b0b0f',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  emptyText: {color: '#9a9aa8', fontSize: 16},
-  info: {alignItems: 'center', marginBottom: 24},
-  title: {
-    color: '#f2f2f5',
-    fontSize: 22,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  artist: {color: '#9a9aa8', fontSize: 16, marginTop: 8, textAlign: 'center'},
-  errorText: {
-    color: '#e08a8a',
-    fontSize: 13,
-    textAlign: 'center',
-    marginTop: 12,
-  },
-  vibeSection: {marginBottom: 24},
-  modeRow: {
+  container: {flex: 1, backgroundColor: colors.bg},
+  center: {flex: 1, alignItems: 'center', justifyContent: 'center'},
+  emptyTopBar: {paddingHorizontal: spacing.md, paddingTop: spacing.xs},
+  emptyText: {color: colors.textSecondary, fontSize: 16},
+  topBar: {
     flexDirection: 'row',
-    justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 14,
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.xs,
   },
-  modeButton: {
-    borderWidth: 1,
-    borderColor: '#26262f',
-    borderRadius: 20,
-    paddingHorizontal: 18,
-    paddingVertical: 8,
-    marginRight: 10,
+  scrollContent: {
+    paddingHorizontal: spacing.xl,
+    paddingBottom: spacing.xxl,
+    alignItems: 'center',
+    flexGrow: 1,
   },
-  modeButtonActive: {backgroundColor: '#5b8def', borderColor: '#5b8def'},
-  modeButtonText: {color: '#9a9aa8', fontSize: 14, fontWeight: '600'},
-  modeButtonTextActive: {color: '#0b0b0f'},
-  rejectButton: {
-    borderWidth: 1,
-    borderColor: '#3d2020',
-    borderRadius: 20,
-    paddingHorizontal: 18,
-    paddingVertical: 8,
-  },
-  rejectButtonText: {color: '#e08a8a', fontSize: 14, fontWeight: '600'},
-  chipRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-  },
-  chip: {
-    borderWidth: 1,
-    borderColor: '#26262f',
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  chipActive: {backgroundColor: '#26262f', borderColor: '#5b8def'},
-  chipText: {color: '#9a9aa8', fontSize: 13},
-  chipTextActive: {color: '#5b8def', fontWeight: '600'},
-  fallbackText: {
-    color: '#6f6f7d',
-    fontSize: 12,
-    textAlign: 'center',
-    marginTop: 4,
-  },
+  artWrap: {marginTop: spacing.lg},
+  info: {alignItems: 'center', marginTop: spacing.xxl, width: '100%'},
+  title: {...type.title, textAlign: 'center'},
+  artist: {color: colors.textSecondary, fontSize: 15, marginTop: spacing.sm, textAlign: 'center'},
+  errorText: {color: colors.danger, fontSize: 13, textAlign: 'center', marginTop: spacing.md},
+  vibeSection: {marginTop: spacing.xxl, width: '100%', alignItems: 'center'},
+  actionChipRow: {flexDirection: 'row', justifyContent: 'center', marginBottom: spacing.sm},
+  chipRow: {flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center'},
+  fallbackText: {color: colors.textTertiary, fontSize: 12, textAlign: 'center', marginTop: spacing.xs},
   progressRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 48,
+    width: '100%',
+    marginTop: spacing.xxl,
   },
-  time: {color: '#6f6f7d', fontSize: 12, width: 40, textAlign: 'center'},
+  time: {color: colors.textTertiary, fontSize: 12, width: 40, textAlign: 'center'},
   progressBarTrack: {
     flex: 1,
     height: 4,
-    backgroundColor: '#26262f',
+    backgroundColor: colors.chipBg,
     borderRadius: 2,
-    marginHorizontal: 8,
+    marginHorizontal: spacing.sm,
     overflow: 'hidden',
   },
-  progressBarFill: {
-    height: 4,
-    backgroundColor: '#5b8def',
-    borderRadius: 2,
-  },
+  progressBarFill: {height: 4, backgroundColor: colors.white, borderRadius: 2},
   controls: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginTop: spacing.xl,
+    paddingHorizontal: spacing.sm,
   },
-  controlButton: {
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-  },
-  controlIcon: {color: '#f2f2f5', fontSize: 32},
-  playButton: {
-    backgroundColor: '#5b8def',
-    borderRadius: 40,
-    width: 80,
-    height: 80,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  playIcon: {color: '#0b0b0f', fontSize: 32},
 });

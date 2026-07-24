@@ -16,6 +16,7 @@ import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
 import {importVibesDb} from '../db/vibesDb';
 import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
+import {colors, radii, spacing, type} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
@@ -139,18 +140,18 @@ export default function SettingsScreen({navigation}: Props) {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>YouTube Music account</Text>
         {!authChecked ? (
-          <ActivityIndicator color="#5b8def" />
+          <ActivityIndicator color={colors.accent} />
         ) : loggedIn ? (
           <>
             <Text style={styles.sectionBody}>Logged in ✓</Text>
             <Pressable
-              style={[styles.button, loggingOut && styles.buttonDisabled]}
+              style={[styles.button, styles.buttonSecondary, loggingOut && styles.buttonDisabled]}
               disabled={loggingOut}
               onPress={onLogout}>
               {loggingOut ? (
-                <ActivityIndicator color="#0b0b0f" />
+                <ActivityIndicator color={colors.textPrimary} />
               ) : (
-                <Text style={styles.buttonText}>Logout</Text>
+                <Text style={styles.buttonSecondaryText}>Logout</Text>
               )}
             </Pressable>
           </>
@@ -177,13 +178,13 @@ export default function SettingsScreen({navigation}: Props) {
           data) on top of songs that are already in your library.
         </Text>
         <Pressable
-          style={[styles.button, importingFile && styles.buttonDisabled]}
+          style={[styles.button, styles.buttonSecondary, importingFile && styles.buttonDisabled]}
           disabled={importingFile}
           onPress={onImportFromFile}>
           {importingFile ? (
-            <ActivityIndicator color="#0b0b0f" />
+            <ActivityIndicator color={colors.textPrimary} />
           ) : (
-            <Text style={styles.buttonText}>Choose file</Text>
+            <Text style={styles.buttonSecondaryText}>Choose file</Text>
           )}
         </Pressable>
       </View>
@@ -202,19 +203,19 @@ export default function SettingsScreen({navigation}: Props) {
           value={syncUrl}
           onChangeText={setSyncUrl}
           placeholder="http://192.168.0.X:8765/vibes.db"
-          placeholderTextColor="#6f6f7d"
+          placeholderTextColor={colors.textTertiary}
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType="url"
         />
         <Pressable
-          style={[styles.button, syncing && styles.buttonDisabled]}
+          style={[styles.button, styles.buttonSecondary, syncing && styles.buttonDisabled]}
           disabled={syncing}
           onPress={onSyncFromWifi}>
           {syncing ? (
-            <ActivityIndicator color="#0b0b0f" />
+            <ActivityIndicator color={colors.textPrimary} />
           ) : (
-            <Text style={styles.buttonText}>Sync now</Text>
+            <Text style={styles.buttonSecondaryText}>Sync now</Text>
           )}
         </Pressable>
       </View>
@@ -223,38 +224,35 @@ export default function SettingsScreen({navigation}: Props) {
 }
 
 const styles = StyleSheet.create({
-  container: {flex: 1, backgroundColor: '#0b0b0f'},
-  content: {padding: 20},
+  container: {flex: 1, backgroundColor: colors.bg},
+  content: {padding: spacing.lg, paddingBottom: spacing.xxxl},
   section: {
-    marginBottom: 32,
-    backgroundColor: '#15151c',
-    borderRadius: 12,
-    padding: 16,
+    marginBottom: spacing.xl,
+    backgroundColor: colors.surface,
+    borderRadius: radii.lg,
+    padding: spacing.lg,
   },
-  sectionTitle: {
-    color: '#f2f2f5',
-    fontSize: 17,
-    fontWeight: '600',
-    marginBottom: 6,
-  },
-  sectionBody: {color: '#9a9aa8', fontSize: 14, marginBottom: 16},
+  sectionTitle: {...type.headline, marginBottom: spacing.xs},
+  sectionBody: {color: colors.textSecondary, fontSize: 14, marginBottom: spacing.lg, lineHeight: 20},
   input: {
     borderWidth: 1,
-    borderColor: '#26262f',
-    borderRadius: 8,
-    color: '#f2f2f5',
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    color: colors.textPrimary,
     fontSize: 15,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    marginBottom: 14,
-    backgroundColor: '#0b0b0f',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md - 2,
+    marginBottom: spacing.md,
+    backgroundColor: colors.surfaceRaised,
   },
   button: {
-    backgroundColor: '#5b8def',
-    paddingVertical: 12,
-    borderRadius: 8,
+    backgroundColor: colors.white,
+    paddingVertical: spacing.md,
+    borderRadius: radii.pill,
     alignItems: 'center',
   },
+  buttonSecondary: {backgroundColor: colors.chipBg},
   buttonDisabled: {opacity: 0.6},
-  buttonText: {color: '#0b0b0f', fontSize: 16, fontWeight: '600'},
+  buttonText: {color: colors.black, fontSize: 16, fontWeight: '700'},
+  buttonSecondaryText: {color: colors.textPrimary, fontSize: 16, fontWeight: '700'},
 });

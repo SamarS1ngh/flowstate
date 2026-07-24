@@ -1,14 +1,14 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useMemo, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
   FlatList,
   Pressable,
   StyleSheet,
-  Switch,
   Text,
   View,
 } from 'react-native';
+import {SafeAreaView, useSafeAreaInsets} from 'react-native-safe-area-context';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
 import {openVibesDb, VibesDb} from '../db/vibesDb';
@@ -18,6 +18,12 @@ import {VibeQueue} from '../engine/vibeQueue';
 import {VibeSong} from '../engine/similarity';
 import {FeedbackStore} from '../engine/feedbackStore';
 import type {Song} from '../types';
+import Chip from '../ui/Chip';
+import CircleButton from '../ui/CircleButton';
+import Collage from '../ui/Collage';
+import IconButton from '../ui/IconButton';
+import ListRow from '../ui/ListRow';
+import {colors, spacing, type} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Playlist'>;
 
@@ -26,16 +32,13 @@ type Props = NativeStackScreenProps<RootStackParamList, 'Playlist'>;
 // it on) but flips ON automatically once the playlist has enough coverage.
 const VIBE_MODE_MIN_ANALYZED = 10;
 
-// TODO(device verification): no device/emulator was available while building
-// this screen. tsc + jest are clean, but the "Vibe mode" toggle, the
-// analyzed-count badge, and building a VibeQueue from a real vibes.db have
-// not been exercised on-device. Verify before relying on this for the
-// release build (see Task 4).
 export default function PlaylistScreen({route, navigation}: Props) {
-  const {playlistId} = route.params;
+  const {playlistId, playlistName} = route.params;
+  const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(true);
   const [songs, setSongs] = useState<Song[]>([]);
   const [vibeSongs, setVibeSongs] = useState<VibeSong[]>([]);
+  const [coverIds, setCoverIds] = useState<string[]>([]);
   const [db, setDb] = useState<VibesDb | null>(null);
   const [vibeMode, setVibeMode] = useState(false);
   const [startingId, setStartingId] = useState<string | null>(null);
@@ -60,14 +63,14 @@ export default function PlaylistScreen({route, navigation}: Props) {
         return;
       }
       const list =
-        playlistId === 'ALL'
-          ? opened.getAllSongs()
-          : opened.getPlaylistSongs(playlistId);
+        playlistId === 'ALL' ? opened.getAllSongs() : opened.getPlaylistSongs(playlistId);
       const analyzed = opened.getVibeSongs(playlistId);
+      const covers = opened.getFirstVideoIds(playlistId, 4);
       if (!cancelled) {
         setDb(opened);
         setSongs(list);
         setVibeSongs(analyzed);
+        setCoverIds(covers);
         setVibeMode(analyzed.length >= VIBE_MODE_MIN_ANALYZED);
         setLoading(false);
       }
@@ -77,7 +80,7 @@ export default function PlaylistScreen({route, navigation}: Props) {
     };
   }, [playlistId]);
 
-  const onPressSong = async (index: number) => {
+  const playIndex = async (index: number) => {
     const song = songs[index];
     setStartingId(song.videoId);
     try {
@@ -110,130 +113,166 @@ export default function PlaylistScreen({route, navigation}: Props) {
       }
       navigation.navigate('Player');
     } catch (e) {
-      Alert.alert(
-        'Could not play song',
-        e instanceof Error ? e.message : 'Unknown error',
-      );
+      Alert.alert('Could not play song', e instanceof Error ? e.message : 'Unknown error');
     } finally {
       setStartingId(null);
     }
   };
 
+  // "Vibe shuffle": starts a vibe session from a random analyzed song
+  // instead of one the user picked -- same VibeQueue construction as tapping
+  // an analyzed row above, just with a randomly-chosen seed. No new engine
+  // behavior, purely a different seed choice.
+  const onVibeShuffle = async () => {
+    if (!db || vibeSongs.length === 0) return;
+    const seed = vibeSongs[Math.floor(Math.random() * vibeSongs.length)];
+    setStartingId(seed.videoId);
+    try {
+      const feedbackStore = new FeedbackStore(db.handle);
+      feedbackStore.ensureTables();
+      const feedback = feedbackStore.snapshot(Date.now());
+      const queue = new VibeQueue(seed, 'drift', {
+        songs: vibeSongs,
+        feedback,
+        onFallback: reportFallback,
+      });
+      await playFrom(queue, seed.song);
+      navigation.navigate('Player');
+    } catch (e) {
+      Alert.alert('Could not start vibe shuffle', e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setStartingId(null);
+    }
+  };
+
+  const analyzedCount = vibeSongs.length;
+  const subtitle = useMemo(
+    () => `${songs.length} song${songs.length === 1 ? '' : 's'} · ${analyzedCount} analyzed`,
+    [songs.length, analyzedCount],
+  );
+
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator color="#5b8def" />
-      </View>
-    );
-  }
-
-  if (songs.length === 0) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.emptyText}>No songs in this playlist.</Text>
+        <ActivityIndicator color={colors.accent} />
       </View>
     );
   }
 
   return (
-    <View style={styles.container}>
-      <View style={styles.vibeHeader}>
-        <View style={styles.vibeHeaderLeft}>
-          <Text style={styles.vibeHeaderTitle}>Vibe mode</Text>
-          <Text style={styles.vibeHeaderBadge}>
-            {vibeSongs.length}/{songs.length} analyzed
-          </Text>
-        </View>
-        <Switch
-          value={vibeMode}
-          onValueChange={setVibeMode}
-          trackColor={{false: '#26262f', true: '#5b8def'}}
-          thumbColor="#f2f2f5"
-        />
+    <SafeAreaView style={styles.container} edges={['top']}>
+      {/* Absolutely-positioned children ignore their parent's padding (CSS
+          padding-box semantics), so the SafeAreaView's top inset above
+          doesn't shift this floating back button on its own -- insets.top
+          is added explicitly here instead. */}
+      <View style={[styles.backRow, {top: insets.top + spacing.sm}]}>
+        <IconButton name="chevronBack" size={28} onPress={() => navigation.goBack()} filled />
       </View>
-      {notice ? (
-        <View style={styles.noticeBanner}>
-          <Text style={styles.noticeText}>{notice}</Text>
+      {songs.length === 0 ? (
+        <View style={styles.center}>
+          <Text style={styles.emptyText}>No songs in this playlist.</Text>
         </View>
-      ) : null}
-      <FlatList
-        style={styles.list}
-        contentContainerStyle={styles.listContent}
-        data={songs}
-        keyExtractor={item => item.videoId}
-        renderItem={({item, index}) => (
-          <Pressable
-            style={({pressed}) => [styles.row, pressed && styles.rowPressed]}
-            disabled={startingId !== null}
-            onPress={() => onPressSong(index)}>
-            <View style={styles.rowText}>
-              <Text style={styles.rowTitle} numberOfLines={1}>
-                {item.title}
-                {!item.hasVibe ? ' ♪?' : ''}
+      ) : (
+        <FlatList
+          style={styles.list}
+          contentContainerStyle={styles.listContent}
+          data={songs}
+          keyExtractor={item => item.videoId}
+          initialNumToRender={14}
+          ListHeaderComponent={
+            <View style={styles.header}>
+              <Collage videoIds={coverIds} size={200} />
+              <Text style={styles.title} numberOfLines={2}>
+                {playlistName}
               </Text>
-              <Text style={styles.rowSubtitle} numberOfLines={1}>
-                {item.artist}
-              </Text>
+              <Text style={styles.subtitle}>{subtitle}</Text>
+
+              <View style={styles.actionsRow}>
+                <CircleButton
+                  icon="play"
+                  size={64}
+                  onPress={() => songs.length > 0 && playIndex(0)}
+                />
+                <Pressable
+                  style={[styles.vibeShuffleButton, vibeSongs.length === 0 && styles.disabled]}
+                  disabled={vibeSongs.length === 0}
+                  onPress={onVibeShuffle}>
+                  <Text style={styles.vibeShuffleText}>✨ Vibe shuffle</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.vibeToggleRow}>
+                <Chip label="Vibe mode: On" active={vibeMode} onPress={() => setVibeMode(true)} tone="accent" />
+                <Chip label="Vibe mode: Off" active={!vibeMode} onPress={() => setVibeMode(false)} />
+              </View>
+
+              {notice ? (
+                <View style={styles.noticeBanner}>
+                  <Text style={styles.noticeText}>{notice}</Text>
+                </View>
+              ) : null}
             </View>
-            {startingId === item.videoId ? (
-              <ActivityIndicator color="#5b8def" />
-            ) : null}
-          </Pressable>
-        )}
-      />
-    </View>
+          }
+          renderItem={({item, index}) => (
+            <ListRow
+              videoId={item.videoId}
+              title={item.title}
+              titleBadge={!item.hasVibe ? '♪?' : undefined}
+              subtitle={item.durationS != null ? `${item.artist} · ${formatDuration(item.durationS)}` : item.artist}
+              disabled={startingId !== null}
+              onPress={() => playIndex(index)}
+              trailing={
+                startingId === item.videoId ? (
+                  <ActivityIndicator color={colors.accent} size="small" />
+                ) : undefined
+              }
+            />
+          )}
+        />
+      )}
+    </SafeAreaView>
   );
 }
 
+function formatDuration(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 const styles = StyleSheet.create({
-  container: {flex: 1, backgroundColor: '#0b0b0f'},
-  vibeHeader: {
+  container: {flex: 1, backgroundColor: colors.bg},
+  backRow: {
+    position: 'absolute',
+    top: spacing.sm,
+    left: spacing.md,
+    zIndex: 10,
+  },
+  center: {flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xxl},
+  emptyText: {color: colors.textSecondary, fontSize: 16},
+  list: {flex: 1, backgroundColor: colors.bg},
+  listContent: {paddingBottom: spacing.xxxl},
+  header: {alignItems: 'center', paddingTop: spacing.xxxl, paddingHorizontal: spacing.lg},
+  title: {...type.title, marginTop: spacing.lg, textAlign: 'center'},
+  subtitle: {color: colors.textSecondary, fontSize: 14, marginTop: spacing.xs},
+  actionsRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#26262f',
-    backgroundColor: '#15151c',
+    marginTop: spacing.xl,
   },
-  vibeHeaderLeft: {flexDirection: 'row', alignItems: 'center'},
-  vibeHeaderTitle: {
-    color: '#f2f2f5',
-    fontSize: 15,
-    fontWeight: '600',
-    marginRight: 10,
+  vibeShuffleButton: {
+    marginLeft: spacing.lg,
+    backgroundColor: colors.chipBg,
+    borderRadius: 999,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.md,
   },
-  vibeHeaderBadge: {color: '#6f6f7d', fontSize: 13},
-  noticeBanner: {
-    backgroundColor: '#15151c',
-    paddingVertical: 8,
-    paddingHorizontal: 20,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#26262f',
-  },
-  noticeText: {color: '#9a9aa8', fontSize: 12, textAlign: 'center'},
-  list: {flex: 1, backgroundColor: '#0b0b0f'},
-  listContent: {paddingVertical: 8},
-  center: {
-    flex: 1,
-    backgroundColor: '#0b0b0f',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  emptyText: {color: '#9a9aa8', fontSize: 16},
-  row: {
+  disabled: {opacity: 0.4},
+  vibeShuffleText: {color: colors.textPrimary, fontSize: 14, fontWeight: '700'},
+  vibeToggleRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#26262f',
+    marginTop: spacing.xl,
   },
-  rowPressed: {backgroundColor: '#15151c'},
-  rowText: {flex: 1, marginRight: 12},
-  rowTitle: {color: '#f2f2f5', fontSize: 16},
-  rowSubtitle: {color: '#6f6f7d', fontSize: 14, marginTop: 2},
+  noticeBanner: {marginTop: spacing.md},
+  noticeText: {color: colors.textTertiary, fontSize: 12, textAlign: 'center'},
 });

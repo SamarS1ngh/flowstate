@@ -35,6 +35,7 @@ import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
 import {buildAuthHeaders, saveAuth} from './authStore';
 import {describeAuthError, startDeviceLogin} from './oauth';
+import {colors, radii, spacing, type} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Login'>;
 
@@ -166,7 +167,7 @@ export default function LoginScreen({navigation}: Props) {
 
           {flow.phase === 'starting' && (
             <View style={styles.codeBox}>
-              <ActivityIndicator color="#5b8def" />
+              <ActivityIndicator color={colors.accent} />
               <Text style={styles.codePending}>Getting your code…</Text>
             </View>
           )}
@@ -192,7 +193,7 @@ export default function LoginScreen({navigation}: Props) {
                 </Text>
               </Pressable>
               <View style={styles.waitingRow}>
-                <ActivityIndicator color="#5b8def" size="small" />
+                <ActivityIndicator color={colors.accent} size="small" />
                 <Text style={styles.waitingText}>
                   Waiting for you to approve on the other device…
                 </Text>
@@ -242,7 +243,7 @@ export default function LoginScreen({navigation}: Props) {
             autoCapitalize="none"
             autoCorrect={false}
             placeholder="SID=...; SAPISID=...; __Secure-3PAPISID=...; ..."
-            placeholderTextColor="#6b6b78"
+            placeholderTextColor={colors.textTertiary}
             value={pastedCookie}
             onChangeText={setPastedCookie}
           />
@@ -254,7 +255,7 @@ export default function LoginScreen({navigation}: Props) {
             disabled={submittingPaste}
             onPress={onSubmitPastedCookie}>
             {submittingPaste ? (
-              <ActivityIndicator color="#0b0b0f" />
+              <ActivityIndicator color={colors.black} />
             ) : (
               <Text style={styles.buttonText}>Log in with pasted cookie</Text>
             )}
@@ -266,103 +267,96 @@ export default function LoginScreen({navigation}: Props) {
 }
 
 const styles = StyleSheet.create({
-  container: {flex: 1, backgroundColor: '#0b0b0f'},
+  container: {flex: 1, backgroundColor: colors.bg},
   modeSwitch: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    backgroundColor: '#15151c',
-    borderBottomWidth: 1,
-    borderBottomColor: '#26262f',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm + 2,
+    backgroundColor: colors.surface,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
   },
-  modeSwitchText: {color: '#5b8def', fontSize: 13, fontWeight: '600'},
-  deviceContainer: {flex: 1, backgroundColor: '#0b0b0f'},
-  deviceContent: {padding: 20, alignItems: 'center'},
-  title: {
-    color: '#f2f2f5',
-    fontSize: 22,
-    fontWeight: '700',
-    marginTop: 12,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
+  modeSwitchText: {color: colors.accent, fontSize: 13, fontWeight: '600'},
+  deviceContainer: {flex: 1, backgroundColor: colors.bg},
+  deviceContent: {padding: spacing.xl, alignItems: 'center'},
+  title: {...type.title, marginTop: spacing.md, marginBottom: spacing.sm, textAlign: 'center'},
   subtitle: {
-    color: '#9a9aa8',
+    color: colors.textSecondary,
     fontSize: 14,
     lineHeight: 20,
     textAlign: 'center',
-    marginBottom: 24,
+    marginBottom: spacing.xxl,
   },
-  subtitleStrong: {color: '#c8c8d2', fontWeight: '600'},
+  subtitleStrong: {color: colors.textPrimary, fontWeight: '600'},
   codeBox: {
     width: '100%',
-    backgroundColor: '#15151c',
-    borderRadius: 12,
+    backgroundColor: colors.surface,
+    borderRadius: radii.lg,
     borderWidth: 1,
-    borderColor: '#26262f',
-    paddingVertical: 28,
-    paddingHorizontal: 16,
+    borderColor: colors.border,
+    paddingVertical: spacing.xxl + 4,
+    paddingHorizontal: spacing.lg,
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: spacing.lg,
   },
   code: {
-    color: '#f2f2f5',
+    color: colors.textPrimary,
     fontSize: 40,
     fontWeight: '800',
     letterSpacing: 4,
-    marginBottom: 12,
+    marginBottom: spacing.md,
   },
-  url: {color: '#5b8def', fontSize: 16, fontWeight: '600'},
-  codePending: {color: '#c8c8d2', fontSize: 15, marginTop: 12},
+  url: {color: colors.accent, fontSize: 16, fontWeight: '600'},
+  codePending: {color: colors.textPrimary, fontSize: 15, marginTop: spacing.md},
   errorText: {
-    color: '#ef5b5b',
+    color: colors.danger,
     fontSize: 14,
     textAlign: 'center',
-    marginBottom: 16,
+    marginBottom: spacing.lg,
   },
   waitingRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 8,
+    marginTop: spacing.sm,
   },
-  waitingText: {color: '#9a9aa8', fontSize: 13, marginLeft: 10},
+  waitingText: {color: colors.textSecondary, fontSize: 13, marginLeft: spacing.sm + 2},
   button: {
     width: '100%',
-    backgroundColor: '#5b8def',
-    paddingVertical: 12,
-    borderRadius: 8,
+    backgroundColor: colors.white,
+    paddingVertical: spacing.md,
+    borderRadius: radii.pill,
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: spacing.md,
   },
   buttonDisabled: {opacity: 0.6},
-  buttonText: {color: '#0b0b0f', fontSize: 16, fontWeight: '600'},
-  secondaryButton: {backgroundColor: '#26262f'},
-  secondaryButtonText: {color: '#f2f2f5', fontSize: 16, fontWeight: '600'},
-  pasteContainer: {flex: 1, backgroundColor: '#0b0b0f'},
-  pasteContent: {padding: 16},
+  buttonText: {color: colors.black, fontSize: 16, fontWeight: '700'},
+  secondaryButton: {backgroundColor: colors.chipBg},
+  secondaryButtonText: {color: colors.textPrimary, fontSize: 16, fontWeight: '700'},
+  pasteContainer: {flex: 1, backgroundColor: colors.bg},
+  pasteContent: {padding: spacing.lg},
   pasteInstructions: {
-    color: '#c8c8d2',
+    color: colors.textPrimary,
     fontSize: 14,
     lineHeight: 20,
-    marginBottom: 8,
+    marginBottom: spacing.sm,
   },
   pasteLink: {
-    color: '#5b8def',
+    color: colors.accent,
     fontSize: 13,
-    marginBottom: 16,
+    marginBottom: spacing.lg,
     textDecorationLine: 'underline',
   },
   pasteInput: {
     minHeight: 140,
-    backgroundColor: '#15151c',
+    backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: '#26262f',
-    borderRadius: 8,
-    padding: 12,
-    color: '#f2f2f5',
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    color: colors.textPrimary,
     fontSize: 13,
     textAlignVertical: 'top',
-    marginBottom: 12,
+    marginBottom: spacing.md,
   },
-  pasteError: {color: '#ef5b5b', fontSize: 13, marginBottom: 12},
+  pasteError: {color: colors.danger, fontSize: 13, marginBottom: spacing.md},
 });

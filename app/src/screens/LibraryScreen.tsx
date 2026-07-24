@@ -1,4 +1,4 @@
-import React, {useCallback, useRef, useState} from 'react';
+import React, {useCallback, useMemo, useRef, useState} from 'react';
 import {
   Alert,
   FlatList,
@@ -9,6 +9,7 @@ import {
   View,
   ActivityIndicator,
 } from 'react-native';
+import {SafeAreaView} from 'react-native-safe-area-context';
 import {useFocusEffect} from '@react-navigation/native';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
@@ -16,31 +17,19 @@ import {ensureBaseSchema, openVibesDb, VibesDb} from '../db/vibesDb';
 import {loadOAuthCreds} from '../auth/authStore';
 import {fetchLibrary} from '../library/syncClient';
 import {syncLibraryToDb} from '../library/syncToDb';
-import type {Playlist} from '../types';
+import {playFrom} from '../player/controller';
+import {SimpleQueue} from '../player/queue';
+import type {Playlist, Song} from '../types';
+import Chip from '../ui/Chip';
+import IconButton from '../ui/IconButton';
+import ListRow from '../ui/ListRow';
+import {colors, spacing, type} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Library'>;
 
 const ALL_SONGS_ID = 'ALL' as const;
 
-function HeaderButton({
-  label,
-  onPress,
-  disabled,
-}: {
-  label: string;
-  onPress: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      hitSlop={12}
-      style={[styles.headerButton, disabled && styles.headerButtonDisabled]}>
-      <Text style={styles.headerButtonText}>{label}</Text>
-    </Pressable>
-  );
-}
+type Filter = 'playlists' | 'songs';
 
 // A db that exists on disk (ensureBaseSchema/import both create the file up
 // front) but has no songs and no playlists yet is, from the user's point of
@@ -57,10 +46,13 @@ export default function LibraryScreen({navigation}: Props) {
   const [loading, setLoading] = useState(true);
   const [db, setDb] = useState<VibesDb | null>(null);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
-  const [allCount, setAllCount] = useState(0);
+  const [allSongs, setAllSongs] = useState<Song[]>([]);
+  const [coverIds, setCoverIds] = useState<Record<string, string>>({});
   const [loggedIn, setLoggedIn] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
+  const [filter, setFilter] = useState<Filter>('playlists');
+  const [startingId, setStartingId] = useState<string | null>(null);
   // Prevents auto-sync from firing again every time this screen regains
   // focus in the same app session (e.g. navigating Library -> Player ->
   // back) once it has already tried once this mount -- a real failure still
@@ -88,10 +80,12 @@ export default function LibraryScreen({navigation}: Props) {
     }
     if (opened) {
       setPlaylists(opened.getPlaylists());
-      setAllCount(opened.getAllSongs().length);
+      setAllSongs(opened.getAllSongs());
+      setCoverIds(opened.getPlaylistCoverVideoIds());
     } else {
       setPlaylists([]);
-      setAllCount(0);
+      setAllSongs([]);
+      setCoverIds({});
     }
   }, []);
 
@@ -177,165 +171,288 @@ export default function LibraryScreen({navigation}: Props) {
     }, []),
   );
 
-  React.useLayoutEffect(() => {
-    navigation.setOptions({
-      headerRight: () => (
-        <View style={styles.headerRow}>
-          {loggedIn ? (
-            <HeaderButton label="Sync" onPress={runSync} disabled={syncing} />
-          ) : null}
-          <HeaderButton
-            label="Settings"
-            onPress={() => navigation.navigate('Settings')}
-          />
-        </View>
-      ),
-    });
-  }, [navigation, loggedIn, syncing, runSync]);
+  // Tapping a row in the "Songs" filter plays that song immediately from the
+  // whole library, mirroring PlaylistScreen's plain (non-vibe) tap behavior
+  // -- reuses the same exported playFrom/SimpleQueue, no new playback logic.
+  const onPressSong = useCallback(
+    async (index: number) => {
+      const song = allSongs[index];
+      setStartingId(song.videoId);
+      try {
+        await playFrom(new SimpleQueue(allSongs, index), song);
+        navigation.navigate('Player');
+      } catch (e) {
+        Alert.alert('Could not play song', e instanceof Error ? e.message : 'Unknown error');
+      } finally {
+        setStartingId(null);
+      }
+    },
+    [allSongs, navigation],
+  );
 
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator color="#5b8def" />
+        <ActivityIndicator color={colors.accent} />
       </View>
     );
   }
 
   if (!db) {
     return (
-      <View style={styles.center}>
-        {syncing ? (
-          <>
-            <ActivityIndicator color="#5b8def" style={styles.emptySpinner} />
-            <Text style={styles.emptyText}>{syncStatus ?? 'Syncing…'}</Text>
-          </>
-        ) : loggedIn ? (
-          <>
-            <Text style={styles.emptyText}>
-              {syncStatus ?? 'Log in succeeded, but nothing has synced yet.'}
-            </Text>
-            <Pressable style={styles.primaryButton} onPress={runSync}>
-              <Text style={styles.primaryButtonText}>Sync library</Text>
-            </Pressable>
-          </>
-        ) : (
-          <>
-            <Text style={styles.emptyText}>No library yet.</Text>
-            <Pressable
-              style={styles.primaryButton}
-              onPress={() => navigation.navigate('Login')}>
-              <Text style={styles.primaryButtonText}>
-                Log in to YouTube Music
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <LibraryHeader
+          loggedIn={loggedIn}
+          syncing={syncing}
+          onSync={runSync}
+          onSettings={() => navigation.navigate('Settings')}
+        />
+        <View style={styles.center}>
+          {syncing ? (
+            <>
+              <ActivityIndicator color={colors.accent} style={styles.emptySpinner} />
+              <Text style={styles.emptyText}>{syncStatus ?? 'Syncing…'}</Text>
+            </>
+          ) : loggedIn ? (
+            <>
+              <Text style={styles.emptyText}>
+                {syncStatus ?? 'Log in succeeded, but nothing has synced yet.'}
               </Text>
-            </Pressable>
-            <Pressable
-              style={styles.secondaryButton}
-              onPress={() => navigation.navigate('Settings')}>
-              <Text style={styles.secondaryButtonText}>
-                Import analysis data instead
-              </Text>
-            </Pressable>
-          </>
-        )}
-      </View>
+              <Pressable style={styles.primaryButton} onPress={runSync}>
+                <Text style={styles.primaryButtonText}>Sync library</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <Text style={styles.emptyText}>No library yet.</Text>
+              <Pressable
+                style={styles.primaryButton}
+                onPress={() => navigation.navigate('Login')}>
+                <Text style={styles.primaryButtonText}>Log in to YouTube Music</Text>
+              </Pressable>
+              <Pressable
+                style={styles.secondaryButton}
+                onPress={() => navigation.navigate('Settings')}>
+                <Text style={styles.secondaryButtonText}>Import analysis data instead</Text>
+              </Pressable>
+            </>
+          )}
+        </View>
+      </SafeAreaView>
     );
   }
 
-  const rows: Array<{playlistId: string; name: string; trackCount: number}> =
-    [
-      {playlistId: ALL_SONGS_ID, name: 'All songs', trackCount: allCount},
-      ...playlists,
-    ];
-
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <LibraryHeader
+        loggedIn={loggedIn}
+        syncing={syncing}
+        onSync={runSync}
+        onSettings={() => navigation.navigate('Settings')}
+      />
+      <View style={styles.chipRow}>
+        <Chip label="Playlists" active={filter === 'playlists'} onPress={() => setFilter('playlists')} />
+        <Chip label="Songs" active={filter === 'songs'} onPress={() => setFilter('songs')} />
+      </View>
       {syncStatus && !syncing ? (
         <View style={styles.statusBanner}>
           <Text style={styles.statusBannerText}>{syncStatus}</Text>
         </View>
       ) : null}
-      <FlatList
-        style={styles.list}
-        contentContainerStyle={styles.listContent}
-        data={rows}
-        keyExtractor={item => item.playlistId}
-        refreshControl={
-          loggedIn ? (
-            <RefreshControl
-              refreshing={syncing}
-              onRefresh={runSync}
-              tintColor="#5b8def"
+      {filter === 'playlists' ? (
+        <PlaylistList
+          navigation={navigation}
+          playlists={playlists}
+          allCount={allSongs.length}
+          coverIds={coverIds}
+          loggedIn={loggedIn}
+          syncing={syncing}
+          onRefresh={runSync}
+        />
+      ) : (
+        <FlatList
+          style={styles.list}
+          contentContainerStyle={styles.listContent}
+          data={allSongs}
+          keyExtractor={item => item.videoId}
+          initialNumToRender={16}
+          renderItem={({item, index}) => (
+            <ListRow
+              videoId={item.videoId}
+              title={item.title}
+              titleBadge={!item.hasVibe ? '♪?' : undefined}
+              subtitle={item.artist}
+              disabled={startingId !== null}
+              onPress={() => onPressSong(index)}
+              trailing={
+                startingId === item.videoId ? (
+                  <ActivityIndicator color={colors.accent} size="small" />
+                ) : undefined
+              }
             />
-          ) : undefined
-        }
-        renderItem={({item}) => (
-          <Pressable
-            style={({pressed}) => [styles.row, pressed && styles.rowPressed]}
-            onPress={() =>
-              navigation.navigate('Playlist', {
-                playlistId: item.playlistId,
-                playlistName: item.name,
-              })
-            }>
-            <Text style={styles.rowTitle}>{item.name}</Text>
-            <Text style={styles.rowSubtitle}>{item.trackCount}</Text>
-          </Pressable>
-        )}
-      />
+          )}
+        />
+      )}
+    </SafeAreaView>
+  );
+}
+
+function LibraryHeader({
+  loggedIn,
+  syncing,
+  onSync,
+  onSettings,
+}: {
+  loggedIn: boolean;
+  syncing: boolean;
+  onSync: () => void;
+  onSettings: () => void;
+}) {
+  return (
+    <View style={styles.header}>
+      <Text style={styles.headerTitle}>Library</Text>
+      <View style={styles.headerActions}>
+        {loggedIn ? (
+          <IconButton name="sync" onPress={onSync} disabled={syncing} size={20} />
+        ) : null}
+        <IconButton name="settings" onPress={onSettings} size={20} />
+      </View>
     </View>
   );
 }
 
+function PlaylistList({
+  navigation,
+  playlists,
+  allCount,
+  coverIds,
+  loggedIn,
+  syncing,
+  onRefresh,
+}: {
+  navigation: Props['navigation'];
+  playlists: Playlist[];
+  allCount: number;
+  coverIds: Record<string, string>;
+  loggedIn: boolean;
+  syncing: boolean;
+  onRefresh: () => void;
+}) {
+  // "All songs" is a pinned pseudo-playlist (not a real row in `playlists`)
+  // -- always first, like the reference app's pinned "Liked music". If a
+  // real playlist happens to be named "Liked Music" (sync brings this over
+  // verbatim from the account), pin it second so both pinned rows sit
+  // together above the rest, which is otherwise alphabetical (getPlaylists()
+  // orders by name).
+  const {pinned, rest} = useMemo(() => {
+    const likedIdx = playlists.findIndex(p => p.name.toLowerCase() === 'liked music');
+    const liked = likedIdx >= 0 ? playlists[likedIdx] : null;
+    const others = likedIdx >= 0 ? playlists.filter((_, i) => i !== likedIdx) : playlists;
+    return {pinned: liked, rest: others};
+  }, [playlists]);
+
+  type Row =
+    | {kind: 'all'}
+    | {kind: 'liked'; playlist: Playlist}
+    | {kind: 'playlist'; playlist: Playlist};
+
+  const rows: Row[] = [
+    {kind: 'all'},
+    ...(pinned ? [{kind: 'liked' as const, playlist: pinned}] : []),
+    ...rest.map(p => ({kind: 'playlist' as const, playlist: p})),
+  ];
+
+  return (
+    <FlatList
+      style={styles.list}
+      contentContainerStyle={styles.listContent}
+      data={rows}
+      keyExtractor={item => (item.kind === 'all' ? ALL_SONGS_ID : item.playlist.playlistId)}
+      refreshControl={
+        loggedIn ? (
+          <RefreshControl refreshing={syncing} onRefresh={onRefresh} tintColor={colors.accent} />
+        ) : undefined
+      }
+      renderItem={({item}) => {
+        if (item.kind === 'all') {
+          return (
+            <ListRow
+              title="All songs"
+              subtitle={`${allCount} song${allCount === 1 ? '' : 's'}`}
+              onPress={() =>
+                navigation.navigate('Playlist', {playlistId: ALL_SONGS_ID, playlistName: 'All songs'})
+              }
+            />
+          );
+        }
+        const {playlist} = item;
+        const isPinned = item.kind === 'liked';
+        return (
+          <ListRow
+            videoId={coverIds[playlist.playlistId]}
+            title={playlist.name}
+            titleBadge={isPinned ? '📌' : undefined}
+            subtitle={`Playlist · ${playlist.trackCount} song${playlist.trackCount === 1 ? '' : 's'}`}
+            onPress={() =>
+              navigation.navigate('Playlist', {
+                playlistId: playlist.playlistId,
+                playlistName: playlist.name,
+              })
+            }
+          />
+        );
+      }}
+    />
+  );
+}
+
 const styles = StyleSheet.create({
-  container: {flex: 1, backgroundColor: '#0b0b0f'},
-  list: {flex: 1, backgroundColor: '#0b0b0f'},
-  listContent: {paddingVertical: 8},
+  container: {flex: 1, backgroundColor: colors.bg},
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.sm,
+  },
+  headerTitle: {...type.display},
+  headerActions: {flexDirection: 'row', alignItems: 'center'},
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xs,
+  },
+  list: {flex: 1, backgroundColor: colors.bg},
+  listContent: {paddingVertical: spacing.sm, paddingBottom: spacing.xxxl},
   center: {
     flex: 1,
-    backgroundColor: '#0b0b0f',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
+    padding: spacing.xxl,
   },
-  emptySpinner: {marginBottom: 16},
+  emptySpinner: {marginBottom: spacing.lg},
   emptyText: {
-    color: '#9a9aa8',
+    color: colors.textSecondary,
     fontSize: 16,
-    marginBottom: 20,
+    marginBottom: spacing.xl,
     textAlign: 'center',
   },
   primaryButton: {
-    backgroundColor: '#5b8def',
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-    marginBottom: 12,
+    backgroundColor: colors.white,
+    paddingHorizontal: spacing.xxl,
+    paddingVertical: spacing.md,
+    borderRadius: 999,
+    marginBottom: spacing.md,
   },
-  primaryButtonText: {color: '#0b0b0f', fontSize: 16, fontWeight: '600'},
-  secondaryButton: {paddingHorizontal: 24, paddingVertical: 10},
-  secondaryButtonText: {color: '#6f6f7d', fontSize: 14},
+  primaryButtonText: {color: colors.black, fontSize: 16, fontWeight: '700'},
+  secondaryButton: {paddingHorizontal: spacing.xxl, paddingVertical: spacing.sm + 2},
+  secondaryButtonText: {color: colors.textSecondary, fontSize: 14},
   statusBanner: {
-    backgroundColor: '#15151c',
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#26262f',
+    backgroundColor: colors.surface,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
   },
-  statusBannerText: {color: '#6f6f7d', fontSize: 13, textAlign: 'center'},
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#26262f',
-  },
-  rowPressed: {backgroundColor: '#15151c'},
-  rowTitle: {color: '#f2f2f5', fontSize: 17},
-  rowSubtitle: {color: '#6f6f7d', fontSize: 15},
-  headerRow: {flexDirection: 'row', alignItems: 'center'},
-  headerButton: {paddingHorizontal: 8, paddingVertical: 4},
-  headerButtonDisabled: {opacity: 0.5},
-  headerButtonText: {color: '#5b8def', fontSize: 16},
+  statusBannerText: {color: colors.textSecondary, fontSize: 13, textAlign: 'center'},
 });
