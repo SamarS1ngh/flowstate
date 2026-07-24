@@ -67,10 +67,25 @@ export default function LibraryScreen({navigation}: Props) {
   // surfaces via syncStatus/Alert and the user can retry with the header
   // button, but focus itself shouldn't hammer the network on every back-nav.
   const autoSyncAttemptedRef = useRef(false);
+  // Mirrors `db` state so loadFromDb can close the *previous* native
+  // connection synchronously when replacing it -- state itself isn't
+  // readable synchronously inside a useCallback without going stale.
+  const dbRef = useRef<VibesDb | null>(null);
+  // Mirrors `syncing` state for the same reason: read synchronously from
+  // inside loadFromDb to decide whether a write is in flight, without
+  // waiting on a state update or adding `syncing` to loadFromDb's deps.
+  const syncingRef = useRef(false);
 
-  const loadFromDb = useCallback(async (): Promise<VibesDb | null> => {
-    const opened = await openVibesDb();
+  // Swaps in a freshly-opened VibesDb (or null) as the current one, closing
+  // whatever connection was open before it so each focus/sync doesn't leak
+  // a native op-sqlite handle.
+  const applyDb = useCallback((opened: VibesDb | null) => {
+    const previous = dbRef.current;
+    dbRef.current = opened;
     setDb(opened);
+    if (previous && previous !== opened) {
+      previous.close();
+    }
     if (opened) {
       setPlaylists(opened.getPlaylists());
       setAllCount(opened.getAllSongs().length);
@@ -78,10 +93,24 @@ export default function LibraryScreen({navigation}: Props) {
       setPlaylists([]);
       setAllCount(0);
     }
-    return opened;
   }, []);
 
+  const loadFromDb = useCallback(async (): Promise<VibesDb | null> => {
+    if (syncingRef.current) {
+      // A sync write is currently in flight (BEGIN..COMMIT in
+      // syncLibraryToDb). Opening/reading the db now risks racing that
+      // transaction (SQLITE_BUSY) and would show a stale view anyway --
+      // runSync reloads on its own right after the write commits, so
+      // there's nothing this call needs to do.
+      return dbRef.current;
+    }
+    const opened = await openVibesDb();
+    applyDb(opened);
+    return opened;
+  }, [applyDb]);
+
   const runSync = useCallback(async () => {
+    syncingRef.current = true;
     setSyncing(true);
     setSyncStatus('Syncing your library…');
     try {
@@ -89,6 +118,10 @@ export default function LibraryScreen({navigation}: Props) {
       const target = await ensureBaseSchema();
       const result = syncLibraryToDb(target, lib);
       target.close();
+      // The write transaction has committed and its connection is closed --
+      // clear the in-flight flag before reloading so this reload (and any
+      // focus-triggered one racing it) actually runs instead of skipping.
+      syncingRef.current = false;
       await loadFromDb();
       setSyncStatus(
         `Synced ${result.playlistCount} playlist${result.playlistCount === 1 ? '' : 's'}, ` +
@@ -103,6 +136,7 @@ export default function LibraryScreen({navigation}: Props) {
         info != null ? `${message}\n\n${String(info).slice(0, 500)}` : message,
       );
     } finally {
+      syncingRef.current = false;
       setSyncing(false);
     }
   }, [loadFromDb]);

@@ -28,8 +28,13 @@ export interface SyncResult {
  * track-id lists a SyncedLibrary implies, deduplicating songs that appear
  * in more than one playlist (each keeps its last-seen title/artist/duration
  * -- library responses are internally consistent per sync, so this is just
- * a defensive tie-break, not a meaningful choice). Pure and unit-tested;
- * syncLibraryToDb below is the thin SQL-writing wrapper around this.
+ * a defensive tie-break, not a meaningful choice). Also dedupes a videoId
+ * that appears more than once *within the same playlist* (real on YouTube),
+ * keeping the first occurrence's position -- playlist_songs' PRIMARY KEY is
+ * (playlist_id, video_id), so a second row for the same pair would otherwise
+ * throw a UNIQUE constraint violation and roll back the whole sync
+ * transaction. Pure and unit-tested; syncLibraryToDb below is the thin
+ * SQL-writing wrapper around this.
  */
 export function assembleSyncRows(lib: SyncedLibrary): {
   songs: Array<{videoId: string; title: string; artist: string; durationS: number | null}>;
@@ -43,8 +48,17 @@ export function assembleSyncRows(lib: SyncedLibrary): {
 
   for (const playlist of lib.playlists ?? []) {
     const videoIds: string[] = [];
+    // A playlist can legitimately contain the same video twice on YouTube
+    // (e.g. added manually more than once). playlist_songs' PRIMARY KEY is
+    // (playlist_id, video_id), so a second occurrence must be dropped here
+    // -- keeping the first occurrence's position -- rather than reaching
+    // the DB layer as a duplicate row and throwing a UNIQUE constraint
+    // error that rolls back the whole sync transaction.
+    const seenInPlaylist = new Set<string>();
     for (const track of playlist.tracks ?? []) {
       if (!track?.videoId) continue;
+      if (seenInPlaylist.has(track.videoId)) continue;
+      seenInPlaylist.add(track.videoId);
       videoIds.push(track.videoId);
       songsById.set(track.videoId, {
         videoId: track.videoId,
@@ -93,9 +107,14 @@ function writeRows(
         playlist.playlistId,
         playlist.name,
       ]);
+      // OR IGNORE is defense-in-depth on top of assembleSyncRows' own
+      // dedup above: playlist_songs' PK is (playlist_id, video_id), so a
+      // duplicate here (whether from a bug upstream or a track that
+      // slipped through) is silently dropped instead of throwing a UNIQUE
+      // constraint violation that would roll back the entire sync.
       playlist.videoIds.forEach((videoId, position) => {
         handle.executeSync(
-          `INSERT INTO playlist_songs (playlist_id, video_id, position) VALUES (?, ?, ?)`,
+          `INSERT OR IGNORE INTO playlist_songs (playlist_id, video_id, position) VALUES (?, ?, ?)`,
           [playlist.playlistId, videoId, position],
         );
       });

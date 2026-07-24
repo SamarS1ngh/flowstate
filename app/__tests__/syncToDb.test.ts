@@ -87,4 +87,36 @@ describe('assembleSyncRows', () => {
     const {playlists} = assembleSyncRows(lib);
     expect(playlists[0].name).toBe('Untitled playlist');
   });
+
+  test('dedupes a videoId that appears twice in the same playlist, keeping the first occurrence', () => {
+    // playlist_songs' PRIMARY KEY is (playlist_id, video_id) -- a real
+    // YouTube playlist can contain the same video more than once, so
+    // assembleSyncRows must collapse it to a single row (first-seen wins)
+    // rather than letting a duplicate reach the DB layer and throw a
+    // UNIQUE constraint violation that rolls back the whole sync.
+    const lib: SyncedLibrary = {
+      playlists: [
+        {
+          playlistId: 'P1',
+          name: 'Dupes allowed',
+          tracks: [
+            {videoId: 'a1', title: 'First', artist: 'Artist A', durationS: 100},
+            {videoId: 'a2', title: 'Song B', artist: 'Artist B', durationS: 180},
+            {videoId: 'a1', title: 'First (again)', artist: 'Artist A2', durationS: 999},
+          ],
+        },
+      ],
+    };
+    const {songs, playlists} = assembleSyncRows(lib);
+
+    expect(playlists[0].videoIds).toEqual(['a1', 'a2']);
+    expect(playlists[0].videoIds.filter(id => id === 'a1')).toHaveLength(1);
+    // First occurrence's metadata wins for the song row too.
+    expect(songs.find(s => s.videoId === 'a1')).toEqual({
+      videoId: 'a1',
+      title: 'First',
+      artist: 'Artist A',
+      durationS: 100,
+    });
+  });
 });

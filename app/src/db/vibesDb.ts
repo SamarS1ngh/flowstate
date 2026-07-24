@@ -256,13 +256,18 @@ export async function importVibesDb(sourcePath: string): Promise<void> {
       // Features: analyzer file is the sole source of truth for these, so a
       // plain REPLACE (features' PK is video_id) is correct -- no need to
       // preserve anything from a previous features row for the same song.
+      // Guarded to src.songs the same way the songs merge above is guarded
+      // to `analyzed = 1`: a features row with no corresponding songs row in
+      // the source file would be orphaned data (shouldn't exist in a
+      // well-formed analyzer db, but the merge shouldn't trust that blindly)
+      // and must not be imported without a song to attach it to.
       handle.executeSync(
         `INSERT OR REPLACE INTO features
          (video_id, embedding, mood_happy, mood_sad, mood_relaxed, mood_aggressive,
           danceable, acoustic, party, bpm, energy, key)
          SELECT video_id, embedding, mood_happy, mood_sad, mood_relaxed, mood_aggressive,
                 danceable, acoustic, party, bpm, energy, key
-         FROM src.features`,
+         FROM src.features WHERE video_id IN (SELECT video_id FROM src.songs)`,
       );
     } finally {
       handle.executeSync(`DETACH DATABASE src`);
