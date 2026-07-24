@@ -15,6 +15,53 @@ import {embeddingFromBlob} from './blob';
 
 export const DB_FILENAME = 'vibes.db';
 
+// Schema version written into a *freshly created* app db (no import ever
+// happened -- e.g. a logged-in user who has only ever synced, never
+// imported an analyzer vibes.db). Deliberately distinct from the analyzer's
+// own SCHEMA_VERSION ("1", checked in importVibesDb below against the
+// *candidate* file being imported) -- these two version markers describe
+// different things and are not meant to compare equal.
+const APP_SCHEMA_VERSION = '2';
+
+// Mirrors analyzer/flowstate_analyzer/db.py's _SCHEMA exactly (column-for-
+// column) so an attached analyzer vibes.db can be merged in via plain
+// `INSERT INTO x SELECT * FROM src.x` without column-list gymnastics, and so
+// a from-scratch app db (synced, never imported) matches the shape every
+// query in this file already assumes.
+function createSchemaIfMissing(db: DB): void {
+  db.executeSync(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+  db.executeSync(`CREATE TABLE IF NOT EXISTS songs (
+    video_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    duration_s INTEGER,
+    analyzed INTEGER NOT NULL DEFAULT 0,
+    analyze_error TEXT
+  )`);
+  db.executeSync(
+    `CREATE TABLE IF NOT EXISTS playlists (playlist_id TEXT PRIMARY KEY, name TEXT NOT NULL)`,
+  );
+  db.executeSync(`CREATE TABLE IF NOT EXISTS playlist_songs (
+    playlist_id TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (playlist_id, video_id)
+  )`);
+  db.executeSync(`CREATE TABLE IF NOT EXISTS features (
+    video_id TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    mood_happy REAL, mood_sad REAL, mood_relaxed REAL, mood_aggressive REAL,
+    danceable REAL, acoustic REAL, party REAL,
+    bpm REAL, energy REAL, key TEXT
+  )`);
+  const res = db.executeSync(`SELECT value FROM meta WHERE key = 'schema_version'`);
+  if (!res.rows.length) {
+    db.executeSync(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`, [
+      APP_SCHEMA_VERSION,
+    ]);
+  }
+}
+
 const SONG_COLS = `s.video_id, s.title, s.artist, s.duration_s,
   EXISTS(SELECT 1 FROM features f WHERE f.video_id = s.video_id) AS has_vibe`;
 
@@ -120,6 +167,10 @@ export class VibesDb {
   get handle(): DB {
     return this.db;
   }
+
+  close(): void {
+    this.db.close();
+  }
 }
 
 function appDbPath(): string {
@@ -132,13 +183,27 @@ function importingPath(): string {
   return `${RNFS.DocumentDirectoryPath}/${IMPORTING_FILENAME}`;
 }
 
-// Validates a candidate vibes.db entirely out-of-place (a `.importing`
-// sidecar file, never the live vibes.db) before it's ever allowed to touch
-// the working library. Previously this copied straight over the live
-// vibes.db and only unlinked it on failure -- which meant a bad or corrupt
-// re-import destroyed a perfectly good existing library. Now a failed
-// candidate only ever costs the temp file; the existing db is never opened,
-// closed, or removed until the new one has already proven valid.
+// Validates a candidate analyzer vibes.db entirely out-of-place (a
+// `.importing` sidecar file, never the live app db) before it's ever
+// allowed to touch the working library. A failed candidate only ever costs
+// the temp file; the existing db is never opened, closed, or removed until
+// the new one has already proven valid.
+//
+// ADAPTATION (Plan C Task 3, Global Constraints): this used to copy the
+// whole analyzer file over the app's vibes.db wholesale, taking it as the
+// single source of truth for songs/playlists/features. Now that library
+// structure (songs/playlists/playlist_songs) is populated by authenticated
+// sync (src/library/syncToDb.ts) and may already be live in the app db
+// before any import ever happens, a wholesale file swap would destroy synced
+// playlists the moment someone imports an analyzer file for vibe features.
+// So this now MERGES: only `features` (the analysis data the analyzer
+// produces, which sync never touches) is brought in, upserted by video_id.
+// `songs` rows are inserted only for videoIds the merge needs but that
+// aren't already present (e.g. a song analyzed by the analyzer that isn't
+// in any currently-synced playlist) -- ON CONFLICT DO NOTHING, so a
+// synced song's title/artist (from the live YT Music account) is never
+// clobbered by potentially-stale analyzer metadata. playlists/playlist_songs
+// are never touched by import at all; those are sync's alone.
 export async function importVibesDb(sourcePath: string): Promise<void> {
   const dest = appDbPath();
   const temp = importingPath();
@@ -148,10 +213,10 @@ export async function importVibesDb(sourcePath: string): Promise<void> {
   await RNFS.unlink(temp).catch(() => {});
   await RNFS.copyFile(sourcePath, temp);
 
-  let db: DB | undefined;
+  let validationDb: DB | undefined;
   try {
-    db = open({name: IMPORTING_FILENAME, location: RNFS.DocumentDirectoryPath});
-    const res = db.executeSync(
+    validationDb = open({name: IMPORTING_FILENAME, location: RNFS.DocumentDirectoryPath});
+    const res = validationDb.executeSync(
       `SELECT value FROM meta WHERE key = 'schema_version'`,
     );
     const version = res.rows.length ? res.rows[0].value : undefined;
@@ -161,33 +226,73 @@ export async function importVibesDb(sourcePath: string): Promise<void> {
       );
     }
   } catch (e) {
-    db?.close();
+    validationDb?.close();
     // Candidate is bad: clean up only the temp file. The existing, working
-    // vibes.db (if any) was never touched, so this can't brick the library.
+    // app db (if any) was never touched, so this can't brick the library.
     await RNFS.unlink(temp).catch(() => {});
     throw e instanceof Error ? e : new Error('vibes.db is not a valid database file');
   }
-  db.close();
+  // Keep the connection open below -- it's about to be ATTACHed to, and
+  // op-sqlite's ATTACH needs the *destination* connection open, not this one.
+  validationDb.close();
 
-  // Candidate validated -- safe to swap it in. Stale -wal/-shm sidecar
-  // files from the *previous* vibes.db must go first: if left behind (e.g.
-  // the app was killed mid-write), SQLite's WAL recovery would otherwise
-  // replay them against the new file's contents on next open, corrupting it.
-  await RNFS.unlink(`${dest}-wal`).catch(() => {});
-  await RNFS.unlink(`${dest}-shm`).catch(() => {});
-
+  // Candidate validated -- safe to merge from it. ensureBaseSchema() so a
+  // fresh, never-synced-or-imported user importing straight away still gets
+  // a valid app db to merge into (not just a bare features grab-bag with no
+  // songs table to satisfy the FK-shaped join every read query assumes).
+  const appDb = await ensureBaseSchema();
+  const handle = appDb.handle;
   try {
-    // On Android this is an atomic rename (overwrites dest in place). Some
-    // platforms' move implementations refuse to overwrite an existing
-    // destination or fail across storage volumes, hence the fallback below.
-    await RNFS.moveFile(temp, dest);
-  } catch {
-    await RNFS.copyFile(temp, dest);
+    handle.executeSync(`ATTACH DATABASE ? AS src`, [temp]);
+    try {
+      // Songs the merge needs a row for, that aren't already present --
+      // ON CONFLICT DO NOTHING so a pre-existing (synced) row always wins.
+      handle.executeSync(
+        `INSERT INTO songs (video_id, title, artist, duration_s, analyzed, analyze_error)
+         SELECT video_id, title, artist, duration_s, analyzed, analyze_error
+         FROM src.songs WHERE analyzed = 1
+         ON CONFLICT(video_id) DO NOTHING`,
+      );
+      // Features: analyzer file is the sole source of truth for these, so a
+      // plain REPLACE (features' PK is video_id) is correct -- no need to
+      // preserve anything from a previous features row for the same song.
+      handle.executeSync(
+        `INSERT OR REPLACE INTO features
+         (video_id, embedding, mood_happy, mood_sad, mood_relaxed, mood_aggressive,
+          danceable, acoustic, party, bpm, energy, key)
+         SELECT video_id, embedding, mood_happy, mood_sad, mood_relaxed, mood_aggressive,
+                danceable, acoustic, party, bpm, energy, key
+         FROM src.features`,
+      );
+    } finally {
+      handle.executeSync(`DETACH DATABASE src`);
+    }
+  } finally {
+    appDb.close();
     await RNFS.unlink(temp).catch(() => {});
+    // Stale -wal/-shm sidecars for the *temp* file specifically (not dest --
+    // dest was never swapped out, so its own WAL state is untouched).
+    await RNFS.unlink(`${temp}-wal`).catch(() => {});
+    await RNFS.unlink(`${temp}-shm`).catch(() => {});
   }
+}
+
+/**
+ * Opens (creating if necessary) the app's db with the base schema present,
+ * for a logged-in user who syncs before ever importing an analyzer file.
+ * Unlike openVibesDb(), this never returns null -- it always hands back a
+ * usable VibesDb, creating vibes.db and its tables from scratch if this is
+ * the very first time anything has touched it on this device.
+ */
+export async function ensureBaseSchema(): Promise<VibesDb> {
+  const db = open({name: DB_FILENAME, location: RNFS.DocumentDirectoryPath});
+  createSchemaIfMissing(db);
+  return new VibesDb(db);
 }
 
 export async function openVibesDb(): Promise<VibesDb | null> {
   if (!(await RNFS.exists(appDbPath()))) return null;
-  return new VibesDb(open({name: DB_FILENAME, location: RNFS.DocumentDirectoryPath}));
+  const db = open({name: DB_FILENAME, location: RNFS.DocumentDirectoryPath});
+  createSchemaIfMissing(db);
+  return new VibesDb(db);
 }

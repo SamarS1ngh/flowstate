@@ -87,7 +87,7 @@ export default function SettingsScreen({navigation}: Props) {
         throw new Error(copy.copyError);
       }
       await importVibesDb(copy.localUri);
-      Alert.alert('Import complete', 'vibes.db imported successfully.', [
+      Alert.alert('Import complete', 'Analysis data imported successfully.', [
         {text: 'OK', onPress: () => navigation.navigate('Library')},
       ]);
     } catch (e: any) {
@@ -119,7 +119,7 @@ export default function SettingsScreen({navigation}: Props) {
         throw new Error(`Server responded with status ${result.statusCode}`);
       }
       await importVibesDb(dest);
-      Alert.alert('Sync complete', 'vibes.db synced successfully.', [
+      Alert.alert('Import complete', 'Analysis data imported successfully.', [
         {text: 'OK', onPress: () => navigation.navigate('Library')},
       ]);
     } catch (e) {
@@ -169,9 +169,12 @@ export default function SettingsScreen({navigation}: Props) {
       </View>
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Import vibes.db from file</Text>
+        <Text style={styles.sectionTitle}>Import analysis data from file</Text>
         <Text style={styles.sectionBody}>
-          Pick a vibes.db file from device storage or a cloud provider.
+          Pick an analyzer vibes.db file from device storage or a cloud
+          provider. Playlists and songs come from your synced YouTube Music
+          account above -- this only adds vibe analysis (mood/similarity
+          data) on top of songs that are already in your library.
         </Text>
         <Pressable
           style={[styles.button, importingFile && styles.buttonDisabled]}
@@ -186,10 +189,13 @@ export default function SettingsScreen({navigation}: Props) {
       </View>
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Sync from PC over wifi</Text>
+        <Text style={styles.sectionTitle}>
+          Import analysis data from PC over wifi
+        </Text>
         <Text style={styles.sectionBody}>
           Enter the URL shown by the analyzer's `serve` command running on
-          your PC.
+          your PC. Same as above -- adds vibe analysis on top of your synced
+          library, doesn't replace it.
         </Text>
         <TextInput
           style={styles.input}
