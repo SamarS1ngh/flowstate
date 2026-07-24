@@ -29,9 +29,50 @@ export function pickAudioFormat<T extends AudioFormatLike>(formats: T[]): T {
   return audio[0];
 }
 
+// Root-cause note (post-login playback regression): this resolver has
+// ALWAYS used its own Innertube instance, separate from
+// src/auth/oauth.ts's getAuthedInnertube() (confirmed: two independent
+// `Innertube.create()` calls, no shared object). That separation is not
+// enough on Android. youtubei.js's react-native platform shim points
+// every Innertube instance's default fetch at the SAME `globalThis.fetch`
+// (node_modules/youtubei.js/dist/src/platform/react-native.js), and React
+// Native's fetch (via the `whatwg-fetch` polyfill over
+// Libraries/Network/XMLHttpRequest.js) defaults `withCredentials` to
+// `true` unless a request explicitly sets `credentials: 'include'|'omit'`.
+// On Android, `withCredentials: true` routes the request through OkHttp's
+// shared `CookieJarContainer`, which is backed by the single, process-wide
+// `android.webkit.CookieManager` (see RN's NetworkingModule.kt --
+// `if (!withCredentials) clientBuilder.cookieJar(NO_COOKIES)` -- and
+// ForwardingCookieHandler.kt, which reads/writes that same CookieManager
+// singleton for every request app-wide, regardless of which JS object or
+// module issued it).
+//
+// So once the user completes OAuth device-flow login and library sync
+// (both via getAuthedInnertube(), both hitting google.com/youtube.com and
+// getting real Set-Cookie session cookies back), those cookies land in
+// that shared CookieManager. This resolver's "separate" Innertube instance
+// still silently attached them to its own getBasicInfo() calls to
+// www.youtube.com (same host), making YouTube's edge see a signed-in
+// request and apply PoT gating to the ANDROID_VR/IOS clients that are
+// otherwise ungated for a genuinely anonymous device -- which is exactly
+// the resolve-time validation failure this regression presented as.
+// Confirmed by code trace (this file + oauth.ts + the RN/whatwg-fetch/
+// youtubei.js sources above) since a real authed-vs-anon fetch can't be
+// driven from a plain Node script (no CookieManager there).
+//
+// Forcing `credentials: 'omit'` here is the actual fix -- it's what makes
+// this resolver's requests genuinely anonymous on-device, independent of
+// whatever the rest of the app is logged into.
+// Exported (only) so a unit test can pin down the `credentials: 'omit'`
+// behavior above without needing a real network stack or RN's
+// CookieManager -- see __tests__/resolver.test.ts.
+export function anonymousFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return fetch(input, {...init, credentials: 'omit'});
+}
+
 let yt: Innertube | null = null;
 async function innertube(): Promise<Innertube> {
-  if (!yt) yt = await Innertube.create({retrieve_player: true});
+  if (!yt) yt = await Innertube.create({retrieve_player: true, fetch: anonymousFetch});
   return yt;
 }
 
@@ -100,7 +141,7 @@ async function validateUrl(url: string, headers: Record<string, string>): Promis
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VALIDATE_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
+    const res = await anonymousFetch(url, {
       method: 'GET',
       headers: {...headers, Range: 'bytes=0-'},
       signal: controller.signal,

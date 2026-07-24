@@ -1,4 +1,4 @@
-import {pickAudioFormat, StreamResolveError} from '../src/stream/resolver';
+import {anonymousFetch, pickAudioFormat, StreamResolveError} from '../src/stream/resolver';
 
 const f = (bitrate: number, hasVideo = false) => ({
   mimeType: 'audio/mp4', bitrate, hasAudio: true, hasVideo,
@@ -22,4 +22,32 @@ test('StreamResolveError supports cause option', () => {
 test('StreamResolveError without cause has undefined cause', () => {
   const err = new StreamResolveError('something failed');
   expect(err.cause).toBeUndefined();
+});
+
+// Regression guard for the post-login playback bug: on Android, RN's fetch
+// defaults `withCredentials` to true, which routes requests through a
+// device-wide CookieManager shared by every Innertube instance in the app
+// (see src/stream/resolver.ts's root-cause comment). This resolver must
+// always force `credentials: 'omit'` so its requests stay genuinely
+// anonymous regardless of what the rest of the app is logged into.
+test('anonymousFetch always forces credentials: omit, preserving other init', async () => {
+  const calls: [unknown, unknown][] = [];
+  const fakeResponse = {ok: true} as Response;
+  (globalThis as any).fetch = (input: unknown, init: unknown) => {
+    calls.push([input, init]);
+    return Promise.resolve(fakeResponse);
+  };
+
+  await anonymousFetch('https://example.com/x', {
+    method: 'GET',
+    headers: {Range: 'bytes=0-'},
+    credentials: 'include', // caller/library default must not survive
+  });
+
+  expect(calls).toHaveLength(1);
+  const [url, init] = calls[0] as [string, RequestInit];
+  expect(url).toBe('https://example.com/x');
+  expect(init.credentials).toBe('omit');
+  expect(init.method).toBe('GET');
+  expect(init.headers).toEqual({Range: 'bytes=0-'});
 });
