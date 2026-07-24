@@ -16,3 +16,22 @@ test('reset re-seeds position', () => {
   q.reset(song('a'));
   expect(q.next(null)?.videoId).toBe('b');
 });
+
+describe('peekUpcoming', () => {
+  test('returns the next N songs without mutating position', () => {
+    const q = new SimpleQueue([song('a'), song('b'), song('c'), song('d')], 0);
+    expect(q.peekUpcoming(2).map(s => s.videoId)).toEqual(['b', 'c']);
+    // next() still resumes from index 0 -> 1, proving peek didn't advance idx
+    expect(q.next(null)?.videoId).toBe('b');
+  });
+
+  test('truncates near the end of the list', () => {
+    const q = new SimpleQueue([song('a'), song('b'), song('c')], 1);
+    expect(q.peekUpcoming(5).map(s => s.videoId)).toEqual(['c']);
+  });
+
+  test('returns empty when already at the last song', () => {
+    const q = new SimpleQueue([song('a'), song('b')], 1);
+    expect(q.peekUpcoming(3)).toEqual([]);
+  });
+});

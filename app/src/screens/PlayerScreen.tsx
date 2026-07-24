@@ -1,27 +1,53 @@
-import React, {useCallback, useEffect, useReducer, useRef, useState} from 'react';
-import {ScrollView, StyleSheet, Text, View} from 'react-native';
+import React, {useCallback, useEffect, useMemo, useReducer, useRef, useState} from 'react';
+import {Alert, Dimensions, FlatList, StyleSheet, Text, View} from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
-import {Event, State, useProgress, useTrackPlayerEvents, usePlaybackState} from 'react-native-track-player';
+import {Gesture, GestureDetector} from 'react-native-gesture-handler';
+import Animated, {
+  Extrapolation,
+  FadeIn,
+  SlideInLeft,
+  SlideInRight,
+  SlideOutLeft,
+  SlideOutRight,
+  interpolate,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
+import Slider from '@react-native-community/slider';
+import TrackPlayer, {
+  Event,
+  State,
+  useProgress,
+  useTrackPlayerEvents,
+  usePlaybackState,
+} from 'react-native-track-player';
 import type {RootStackParamList} from '../App';
 import {
   currentSource,
   consumeFallbackStatus,
   nowPlaying,
+  peekUpcoming,
+  playFrom,
+  reportFallback,
   skipToNext,
   skipToPrevious,
   togglePlayPause,
   FallbackKind,
 } from '../player/controller';
-import {openVibesDb} from '../db/vibesDb';
+import {openVibesDb, VibesDb} from '../db/vibesDb';
 import {FeedbackStore} from '../engine/feedbackStore';
 import {VibeQueue} from '../engine/vibeQueue';
 import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
 import IconButton from '../ui/IconButton';
+import ListRow from '../ui/ListRow';
 import Thumbnail from '../ui/Thumbnail';
-import {colors, spacing, thumbSize, type} from '../ui/theme';
+import {colors, radii, spacing, thumbSize, type} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Player'>;
 
@@ -47,11 +73,41 @@ const FALLBACK_LABEL: Record<FallbackKind, string> = {
   error: 'playback failed — check connection',
 };
 
+// Album art: as large as the reference app's now-playing screen, but capped
+// to the screen width (minus side padding) so it never overflows on a
+// narrower device -- there's a lot more content below it now (slider,
+// transport, Up Next) than the old layout had.
+const {width: SCREEN_WIDTH} = Dimensions.get('window');
+const ART_SIZE = Math.min(thumbSize.player, SCREEN_WIDTH - spacing.xxl * 2);
+
+const UP_NEXT_COUNT = 6;
+
+// Gesture thresholds (Task: swipe/pull-down redesign). Distance is in dp,
+// velocity in dp/s (react-native-gesture-handler's Pan event units) -- either
+// crossing its threshold commits the gesture, matching the brief's
+// "threshold + velocity based" requirement so a fast flick commits even if
+// the finger didn't travel far.
+const DISMISS_DISTANCE = 120;
+const DISMISS_VELOCITY = 1200;
+const SWIPE_DISTANCE = 70;
+const SWIPE_VELOCITY = 800;
+
 export default function PlayerScreen({navigation}: Props) {
   const [song, setSong] = useState<Song | null>(() => nowPlaying());
   const [selectedMood, setSelectedMood] = useState<string | null>(null);
   const [fallbackStatus, setFallbackStatus] = useState<FallbackKind | null>(null);
   const [feedbackStore, setFeedbackStore] = useState<FeedbackStore | null>(null);
+  const [vibesDb, setVibesDb] = useState<VibesDb | null>(null);
+  const [startingVibe, setStartingVibe] = useState(false);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekPreview, setSeekPreview] = useState(0);
+  // Which way the art should slide in/out on the next song change -- set
+  // right before calling skipToNext/skipToPrevious (by gesture or by the
+  // transport buttons), consumed by the art's entering/exiting animation
+  // below. null only on first mount, where a plain fade reads better than a
+  // directional slide from nowhere.
+  const [swipeDir, setSwipeDir] = useState<'left' | 'right' | null>(null);
+
   const progress = useProgress(500);
   const playbackState = usePlaybackState();
 
@@ -90,9 +146,10 @@ export default function PlayerScreen({navigation}: Props) {
     refreshSong();
   }, [refreshSong]);
 
-  // FeedbackStore needs a live DB handle; opened once per screen visit and
-  // reused for both the "doesn't fit" write and (defensively) ensureTables,
-  // in case vibes.db was imported after App.tsx's bootstrap-time call.
+  // FeedbackStore + the raw VibesDb handle both need a live db handle;
+  // opened once per screen visit. VibesDb itself is kept (not just the
+  // FeedbackStore built from it) so "Start vibe from here" can look up
+  // library-wide vibe songs on demand without a second openVibesDb() call.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -101,6 +158,7 @@ export default function PlayerScreen({navigation}: Props) {
       const store = new FeedbackStore(opened.handle);
       store.ensureTables();
       setFeedbackStore(store);
+      setVibesDb(opened);
     })();
     return () => {
       cancelled = true;
@@ -124,6 +182,15 @@ export default function PlayerScreen({navigation}: Props) {
   }, [src]);
 
   const isPlaying = playbackState.state === State.Playing;
+  const isLock = src instanceof VibeQueue && src.label === 'vibe:lock';
+
+  // Up Next preview (Task: fill the emptiness). SimpleQueue's order is fully
+  // known ahead of time so it can be peeked without side effects; VibeQueue
+  // picks weighted-random on each next() call, so there is no honest
+  // deterministic list to show -- the section below falls back to a plain
+  // "vibe will choose" note for it instead of faking one (see
+  // QueueSource.peekUpcoming).
+  const upcoming = isVibe ? [] : peekUpcoming(UP_NEXT_COUNT);
 
   const onToggleLockDrift = () => {
     if (!(src instanceof VibeQueue)) return;
@@ -146,6 +213,129 @@ export default function PlayerScreen({navigation}: Props) {
     await skipToNext();
   };
 
+  // "Start vibe from here" (Task: never-empty action row for a plain
+  // SimpleQueue). Mirrors PlaylistScreen's own vibe-session construction
+  // exactly (VibeQueue + FeedbackStore snapshot + playFrom) -- no new engine
+  // behavior, just triggering the existing one from a song that's already
+  // analyzed but wasn't opened in vibe mode, scoped to the whole library
+  // ('ALL') since the Player screen has no playlist context of its own.
+  const onStartVibeFromHere = async () => {
+    if (!song || isVibe || startingVibe) return;
+    setStartingVibe(true);
+    try {
+      const db = vibesDb ?? (await openVibesDb());
+      if (!db) {
+        Alert.alert('Vibe unavailable', 'No vibes database found on this device.');
+        return;
+      }
+      const vibeSongs = db.getVibeSongs('ALL');
+      const seed = vibeSongs.find(v => v.videoId === song.videoId);
+      if (!seed) {
+        Alert.alert('Not analyzed', 'This song has no vibe analysis yet.');
+        return;
+      }
+      const store = feedbackStore ?? new FeedbackStore(db.handle);
+      store.ensureTables();
+      const feedback = store.snapshot(Date.now());
+      const queue = new VibeQueue(seed, 'drift', {
+        songs: vibeSongs,
+        feedback,
+        onFallback: reportFallback,
+      });
+      await playFrom(queue, seed.song);
+    } catch (e) {
+      Alert.alert('Could not start vibe', e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setStartingVibe(false);
+    }
+  };
+
+  // Shared by both the transport buttons and the horizontal swipe gesture so
+  // the art's slide direction is consistent regardless of which one the user
+  // used.
+  const handleNext = useCallback(() => {
+    setSwipeDir('left');
+    skipToNext();
+  }, []);
+  const handlePrev = useCallback(() => {
+    setSwipeDir('right');
+    skipToPrevious();
+  }, []);
+
+  const dismiss = useCallback(() => navigation.goBack(), [navigation]);
+
+  // --- Gestures (Task: pull-down-to-dismiss + swipe-to-skip) ---------------
+  // translateY drives the *entire* screen's transform (see screenAnimatedStyle
+  // below) so the whole player visually slides down together, but the
+  // GestureDetector below is only attached to the hero area (top bar + art +
+  // title/artist + action row) -- deliberately excluding the slider and the
+  // Up Next list, which have their own touch handling (native SeekBar drag,
+  // FlatList scroll) that a screen-wide pan recognizer would otherwise fight.
+  const translateY = useSharedValue(0);
+
+  // Single Pan gesture that decides its own dominant axis at runtime, rather
+  // than racing two separately-configured Pan gestures against each other via
+  // activeOffsetX/Y + failOffsetX/Y. That two-gesture Race setup looked
+  // correct on paper but device-testing showed the horizontal swipe never
+  // won the race in practice (only the vertical dismiss ever fired) --
+  // deciding "is this drag more X or more Y so far" ourselves, every frame,
+  // is unambiguous and doesn't depend on getting two independent
+  // offset/fail thresholds to interact exactly right.
+  const panGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .onUpdate(e => {
+          // Only let a vertical-reading drag push the screen down -- once a
+          // swipe is reading as horizontal (|dx| > |dy|), leave translateY
+          // alone so a track-change swipe doesn't also nudge the screen.
+          if (e.translationY > 0 && e.translationY >= Math.abs(e.translationX)) {
+            translateY.value = e.translationY;
+          }
+        })
+        .onEnd(e => {
+          const absX = Math.abs(e.translationX);
+          const absY = Math.abs(e.translationY);
+          if (absX > absY) {
+            // Horizontal-dominant: treat as a track-change swipe. translateY
+            // never moved for a drag this horizontal (see onUpdate above),
+            // so no spring-back is needed here.
+            if (e.translationX < -SWIPE_DISTANCE || e.velocityX < -SWIPE_VELOCITY) {
+              runOnJS(handleNext)();
+            } else if (e.translationX > SWIPE_DISTANCE || e.velocityX > SWIPE_VELOCITY) {
+              runOnJS(handlePrev)();
+            }
+            return;
+          }
+          // Vertical-dominant: dismiss past the threshold, else spring back.
+          if (e.translationY > DISMISS_DISTANCE || e.velocityY > DISMISS_VELOCITY) {
+            translateY.value = withTiming(700, {duration: 180}, finished => {
+              if (finished) runOnJS(dismiss)();
+            });
+          } else {
+            translateY.value = withSpring(0, {damping: 18, stiffness: 180});
+          }
+        }),
+    [dismiss, handleNext, handlePrev],
+  );
+
+  const screenAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{translateY: translateY.value}],
+    // Subtle fade as the player is dragged down, so the gesture reads as
+    // "letting go of the screen" rather than a dead pixel-for-pixel drag.
+    opacity: interpolate(
+      translateY.value,
+      [0, DISMISS_DISTANCE * 1.5],
+      [1, 0.5],
+      Extrapolation.CLAMP,
+    ),
+  }));
+
+  const onSlidingStart = () => setIsSeeking(true);
+  const onSlidingComplete = async (value: number) => {
+    setIsSeeking(false);
+    await TrackPlayer.seekTo(value);
+  };
+
   if (!song) {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
@@ -159,165 +349,271 @@ export default function PlayerScreen({navigation}: Props) {
     );
   }
 
-  const isLock = src instanceof VibeQueue && src.label === 'vibe:lock';
+  const duration = progress.duration > 0 ? progress.duration : 0;
+  const sliderMax = duration > 0 ? duration : 1;
+  const displayPosition = isSeeking ? seekPreview : progress.position;
+  const bufferedValue = Math.min(progress.buffered, sliderMax);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-      <View style={styles.topBar}>
-        <IconButton name="chevronDown" size={26} onPress={() => navigation.goBack()} />
-        <IconButton name="menu" size={22} onPress={() => navigation.navigate('Settings')} />
-      </View>
-
-      <ScrollView
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}>
-        <View style={styles.artWrap}>
-          <Thumbnail videoId={song.videoId} size={thumbSize.player} radius={12} />
-        </View>
-
-        <View style={styles.info}>
-          <Text style={styles.title} numberOfLines={2}>
-            {song.title}
-          </Text>
-          <Text style={styles.artist} numberOfLines={1}>
-            {song.artist}
-          </Text>
-        </View>
-
-        {fallbackStatus === 'error' ? (
-          // Surfaced regardless of vibe mode: skipToNext's consecutive-failure
-          // cap can fire for a plain SimpleQueue too (not just VibeQueue), so
-          // this banner isn't gated behind isVibe like the relaxed/random ones
-          // below.
-          <Text style={styles.errorText}>{FALLBACK_LABEL.error}</Text>
-        ) : null}
-
-        {isVibe ? (
-          <View style={styles.vibeSection}>
-            <View style={styles.actionChipRow}>
-              <Chip
-                label={isLock ? '🔒 Lock' : '〜 Drift'}
-                active={isLock}
-                onPress={onToggleLockDrift}
-                tone="accent"
-              />
-              <Chip label="👎 Doesn't fit" active onPress={onDoesntFit} tone="danger" />
+      <Animated.View style={[styles.flexFill, screenAnimatedStyle]}>
+        <GestureDetector gesture={panGesture}>
+          <View style={styles.hero}>
+            <View style={styles.topBar}>
+              <IconButton name="chevronDown" size={26} onPress={() => navigation.goBack()} />
+              <Text style={styles.contextLabel} numberOfLines={1}>
+                {isVibe ? (isLock ? 'Vibe · Lock' : 'Vibe · Drift') : `Playing from ${src?.label ?? 'queue'}`}
+              </Text>
+              {/* Balances the chevron-down button's width so the label above
+                  stays visually centered -- no 3-dot menu here on purpose:
+                  there's nothing real to put in one (no "go to playlist"
+                  context is tracked by the controller, and this redesign
+                  doesn't invent playback/navigation features to fill a
+                  dead icon). */}
+              <View style={styles.topBarSpacer} />
             </View>
 
-            <View style={styles.chipRow}>
-              {MOOD_CHIPS.map(chip => (
-                <Chip
-                  key={chip.key}
-                  label={chip.label}
-                  active={selectedMood === chip.key}
-                  onPress={() => onToggleMood(chip.key)}
-                />
-              ))}
+            <View style={styles.artWrap}>
+              <Animated.View
+                key={song.videoId}
+                entering={
+                  swipeDir === 'left'
+                    ? SlideInRight.duration(220)
+                    : swipeDir === 'right'
+                    ? SlideInLeft.duration(220)
+                    : FadeIn.duration(200)
+                }
+                exiting={swipeDir === 'right' ? SlideOutRight.duration(200) : SlideOutLeft.duration(200)}>
+                <Thumbnail videoId={song.videoId} size={ART_SIZE} radius={16} />
+              </Animated.View>
             </View>
 
-            {fallbackStatus && fallbackStatus !== 'error' ? (
-              <Text style={styles.fallbackText}>{FALLBACK_LABEL[fallbackStatus]}</Text>
+            <View style={styles.info}>
+              <Text style={styles.title} numberOfLines={2}>
+                {song.title}
+              </Text>
+              <Text style={styles.artist} numberOfLines={1}>
+                {song.artist}
+              </Text>
+            </View>
+
+            {fallbackStatus === 'error' ? (
+              // Surfaced regardless of vibe mode: skipToNext's consecutive-failure
+              // cap can fire for a plain SimpleQueue too (not just VibeQueue), so
+              // this banner isn't gated behind isVibe like the relaxed/random ones
+              // below.
+              <Text style={styles.errorText}>{FALLBACK_LABEL.error}</Text>
             ) : null}
-          </View>
-        ) : null}
 
-        <View style={styles.progressRow}>
-          <Text style={styles.time}>{formatTime(progress.position)}</Text>
-          <View style={styles.progressBarTrack}>
-            <View
-              style={[
-                styles.progressBarFill,
-                {
-                  width: `${
-                    progress.duration > 0
-                      ? Math.min(100, (progress.position / progress.duration) * 100)
-                      : 0
-                  }%`,
-                },
-              ]}
+            {isVibe ? (
+              <View style={styles.vibeSection}>
+                <View style={styles.actionChipRow}>
+                  <Chip
+                    label={isLock ? '🔒 Lock' : '〜 Drift'}
+                    active={isLock}
+                    onPress={onToggleLockDrift}
+                    tone="accent"
+                  />
+                  <Chip label="👎 Doesn't fit" active onPress={onDoesntFit} tone="danger" />
+                </View>
+
+                <View style={styles.chipRow}>
+                  {MOOD_CHIPS.map(chip => (
+                    <Chip
+                      key={chip.key}
+                      label={chip.label}
+                      active={selectedMood === chip.key}
+                      onPress={() => onToggleMood(chip.key)}
+                    />
+                  ))}
+                </View>
+
+                {fallbackStatus && fallbackStatus !== 'error' ? (
+                  <Text style={styles.fallbackText}>{FALLBACK_LABEL[fallbackStatus]}</Text>
+                ) : null}
+              </View>
+            ) : (
+              // Action row is never left empty: a real, working "start a
+              // vibe session from this song" action when it's analyzed, or
+              // an honest "not analyzed" note (no fake buttons) when it
+              // isn't.
+              <View style={styles.actionChipRow}>
+                {song.hasVibe ? (
+                  <Chip
+                    label={startingVibe ? 'Starting vibe…' : '✨ Start vibe from here'}
+                    active
+                    tone="accent"
+                    onPress={startingVibe ? undefined : onStartVibeFromHere}
+                  />
+                ) : (
+                  <Chip label="Not analyzed yet" />
+                )}
+              </View>
+            )}
+          </View>
+        </GestureDetector>
+
+        <View style={styles.lower}>
+          <View style={styles.sliderWrap}>
+            {/* Two stacked native sliders sharing identical track geometry:
+                the back one (disabled -- never receives touches) renders the
+                buffered range so it can't fight the front one's drag; the
+                front one is the real interactive seek control. Its
+                maximumTrackTintColor is transparent so the back slider's
+                buffered/unbuffered colors show through past the playhead. */}
+            <Slider
+              style={StyleSheet.absoluteFill}
+              disabled
+              minimumValue={0}
+              maximumValue={sliderMax}
+              value={bufferedValue}
+              minimumTrackTintColor={colors.textTertiary}
+              maximumTrackTintColor={colors.chipBg}
+              thumbTintColor="transparent"
+            />
+            <Slider
+              style={StyleSheet.absoluteFill}
+              minimumValue={0}
+              maximumValue={sliderMax}
+              value={displayPosition}
+              onSlidingStart={onSlidingStart}
+              onValueChange={setSeekPreview}
+              onSlidingComplete={onSlidingComplete}
+              minimumTrackTintColor={colors.white}
+              maximumTrackTintColor="transparent"
+              thumbTintColor={colors.white}
             />
           </View>
-          <Text style={styles.time}>{formatTime(progress.duration)}</Text>
-        </View>
+          <View style={styles.timeRow}>
+            <Text style={styles.time}>{formatTime(displayPosition)}</Text>
+            <Text style={styles.time}>{formatTime(duration)}</Text>
+          </View>
 
-        <View style={styles.controls}>
-          {/* "shuffle-vibe": mirrors the lock/drift chip above in transport-row
-              position (matches the reference app's shuffle-prev-play-next-repeat
-              layout) -- dimmed/inert when there's no vibe queue to toggle. */}
-          <IconButton
-            name="shuffle"
-            size={22}
-            color={isVibe ? (isLock ? colors.textTertiary : colors.accent) : colors.textTertiary}
-            disabled={!isVibe}
-            onPress={onToggleLockDrift}
-          />
-          <IconButton name="previous" size={30} onPress={() => skipToPrevious()} />
-          <CircleButton
-            icon={isPlaying ? 'pause' : 'play'}
-            size={72}
-            onPress={() => togglePlayPause()}
-          />
-          <IconButton name="next" size={30} onPress={() => skipToNext()} />
-          {/* Repeat: decorative only -- no repeat-track/queue concept exists in
-              controller.ts/queue.ts, and this redesign doesn't invent new
-              playback logic. Rendered dimmed so it doesn't imply a working
-              toggle. */}
-          <IconButton name="repeat" size={22} color={colors.textTertiary} disabled />
+          <View style={styles.controls}>
+            {/* "shuffle-vibe": mirrors the lock/drift chip above in transport-row
+                position (matches the reference app's shuffle-prev-play-next-repeat
+                layout) -- dimmed/inert when there's no vibe queue to toggle. */}
+            <IconButton
+              name="shuffle"
+              size={22}
+              color={isVibe ? (isLock ? colors.textTertiary : colors.accent) : colors.textTertiary}
+              disabled={!isVibe}
+              onPress={onToggleLockDrift}
+            />
+            <IconButton name="previous" size={30} onPress={handlePrev} />
+            <CircleButton
+              icon={isPlaying ? 'pause' : 'play'}
+              size={72}
+              onPress={() => togglePlayPause()}
+            />
+            <IconButton name="next" size={30} onPress={handleNext} />
+            {/* Repeat: decorative only -- no repeat-track/queue concept exists in
+                controller.ts/queue.ts, and this redesign doesn't invent new
+                playback logic. Rendered dimmed so it doesn't imply a working
+                toggle. */}
+            <IconButton name="repeat" size={22} color={colors.textTertiary} disabled />
+          </View>
+
+          <Text style={styles.sectionLabel}>UP NEXT</Text>
+          {isVibe ? (
+            <View style={styles.upNextEmpty}>
+              <Text style={styles.upNextHint}>
+                {isLock
+                  ? 'Locked -- vibe will keep replaying songs like this one'
+                  : 'Vibe will choose the next song based on your mood'}
+              </Text>
+            </View>
+          ) : upcoming.length === 0 ? (
+            <View style={styles.upNextEmpty}>
+              <Text style={styles.upNextHint}>End of queue</Text>
+            </View>
+          ) : (
+            <FlatList
+              style={styles.upNextList}
+              contentContainerStyle={styles.upNextContent}
+              data={upcoming}
+              keyExtractor={item => item.videoId}
+              renderItem={({item}) => (
+                <ListRow
+                  videoId={item.videoId}
+                  title={item.title}
+                  subtitle={item.artist}
+                  thumbRadius={radii.sm}
+                />
+              )}
+            />
+          )}
         </View>
-      </ScrollView>
+      </Animated.View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {flex: 1, backgroundColor: colors.bg},
+  flexFill: {flex: 1},
   center: {flex: 1, alignItems: 'center', justifyContent: 'center'},
   emptyTopBar: {paddingHorizontal: spacing.md, paddingTop: spacing.xs},
   emptyText: {color: colors.textSecondary, fontSize: 16},
+  hero: {alignItems: 'center', paddingHorizontal: spacing.xl},
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.md,
+    width: '100%',
     paddingTop: spacing.xs,
   },
-  scrollContent: {
-    paddingHorizontal: spacing.xl,
-    paddingBottom: spacing.xxl,
-    alignItems: 'center',
-    flexGrow: 1,
+  contextLabel: {
+    flex: 1,
+    textAlign: 'center',
+    color: colors.textTertiary,
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginHorizontal: spacing.sm,
   },
+  topBarSpacer: {width: 40},
   artWrap: {marginTop: spacing.lg},
-  info: {alignItems: 'center', marginTop: spacing.xxl, width: '100%'},
+  info: {alignItems: 'center', marginTop: spacing.xl, width: '100%'},
   title: {...type.title, textAlign: 'center'},
   artist: {color: colors.textSecondary, fontSize: 15, marginTop: spacing.sm, textAlign: 'center'},
   errorText: {color: colors.danger, fontSize: 13, textAlign: 'center', marginTop: spacing.md},
-  vibeSection: {marginTop: spacing.xxl, width: '100%', alignItems: 'center'},
-  actionChipRow: {flexDirection: 'row', justifyContent: 'center', marginBottom: spacing.sm},
+  vibeSection: {marginTop: spacing.lg, width: '100%', alignItems: 'center'},
+  actionChipRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginTop: spacing.lg,
+    marginBottom: spacing.sm,
+  },
   chipRow: {flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center'},
   fallbackText: {color: colors.textTertiary, fontSize: 12, textAlign: 'center', marginTop: spacing.xs},
-  progressRow: {
+  lower: {flex: 1, paddingHorizontal: spacing.xl, minHeight: 0},
+  sliderWrap: {height: 36, justifyContent: 'center', marginTop: spacing.md},
+  timeRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    width: '100%',
-    marginTop: spacing.xxl,
+    justifyContent: 'space-between',
+    marginTop: -spacing.xs,
   },
-  time: {color: colors.textTertiary, fontSize: 12, width: 40, textAlign: 'center'},
-  progressBarTrack: {
-    flex: 1,
-    height: 4,
-    backgroundColor: colors.chipBg,
-    borderRadius: 2,
-    marginHorizontal: spacing.sm,
-    overflow: 'hidden',
-  },
-  progressBarFill: {height: 4, backgroundColor: colors.white, borderRadius: 2},
+  time: {color: colors.textTertiary, fontSize: 12},
   controls: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     width: '100%',
-    marginTop: spacing.xl,
+    marginTop: spacing.lg,
     paddingHorizontal: spacing.sm,
   },
+  sectionLabel: {
+    color: colors.textTertiary,
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    marginTop: spacing.xl,
+    marginBottom: spacing.xs,
+  },
+  upNextEmpty: {paddingVertical: spacing.lg},
+  upNextHint: {color: colors.textTertiary, fontSize: 13, textAlign: 'center'},
+  upNextList: {flex: 1},
+  upNextContent: {paddingBottom: spacing.xxl},
 });

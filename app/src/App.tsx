@@ -1,5 +1,6 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {PermissionsAndroid, Platform, StyleSheet, Text, View} from 'react-native';
+import {GestureHandlerRootView} from 'react-native-gesture-handler';
 import {
   createNavigationContainerRef,
   DarkTheme,
@@ -158,9 +159,15 @@ export default function App() {
     );
   }
   return (
-    <SafeAreaProvider>
-      <AppShell />
-    </SafeAreaProvider>
+    // Required root wrapper for react-native-gesture-handler (PlayerScreen's
+    // pull-down-to-dismiss / swipe-to-skip gestures) -- must wrap everything
+    // that uses gesture-handler, so it sits at the very top, outside even
+    // SafeAreaProvider/NavigationContainer.
+    <GestureHandlerRootView style={styles.root}>
+      <SafeAreaProvider>
+        <AppShell />
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 

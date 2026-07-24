@@ -109,6 +109,14 @@ export function currentSource(): QueueSource | null {
   return source;
 }
 
+// Thin pass-through to the active source's optional peekUpcoming (see
+// QueueSource.peekUpcoming) -- lets PlayerScreen's Up Next list stay
+// decoupled from whether the current source actually supports peeking,
+// without needing its own `?.` chaining at every call site.
+export function peekUpcoming(count: number): Song[] {
+  return source?.peekUpcoming?.(count) ?? [];
+}
+
 export async function togglePlayPause(): Promise<void> {
   const state = (await TrackPlayer.getPlaybackState()).state;
   if (state === State.Playing) await TrackPlayer.pause();
