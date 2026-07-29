@@ -9,6 +9,11 @@ const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
  */
 const config = {
   resolver: {
+    // react-native-fast-tflite loads bundled models via require('./model.tflite');
+    // Metro only treats an extension as a binary asset (returning a resolved
+    // file path/module id instead of trying to parse it as JS) once it's
+    // listed here.
+    assetExts: [...getDefaultConfig(__dirname).resolver.assetExts, 'tflite'],
     resolveRequest: (context, moduleName, platform) => {
       // youtubei.js's "react-native" export condition points at its raw
       // dist/src/platform/react-native.js, which pulls in the package's full

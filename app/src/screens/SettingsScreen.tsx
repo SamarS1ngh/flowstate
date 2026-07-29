@@ -17,6 +17,7 @@ import type {RootStackParamList} from '../App';
 import {importVibesDb} from '../db/vibesDb';
 import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
 import {colors, radii, spacing, type} from '../ui/theme';
+import {analyzeEmbeddingAndMoods} from '../analyze/tflite';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
@@ -26,6 +27,7 @@ export default function SettingsScreen({navigation}: Props) {
   const [authChecked, setAuthChecked] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [tfliteProbing, setTfliteProbing] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -133,6 +135,44 @@ export default function SettingsScreen({navigation}: Props) {
     }
   };
 
+  // Task 4 on-device sanity probe (Plan D Phase 2): proves react-native-fast-tflite
+  // actually loads the bundled embedding + mood-head models and runs them on
+  // a real phone, without depending on Task 5's mel pipeline. Feeds a FIXED
+  // synthetic ramp patch (not all-zeros, so a degenerate all-zero-output bug
+  // would be visible) through loadModels() + runEmbedding()/runMoods() and
+  // reports the embedding's shape + a couple of mood scores. __DEV__-gated:
+  // never rendered in a release build. Real inference correctness (vs the
+  // essentia reference) is verified on-device in Task 5, not here.
+  const onRunTfliteProbe = async () => {
+    setTfliteProbing(true);
+    try {
+      const patch = new Float32Array(187 * 96);
+      for (let i = 0; i < patch.length; i++) {
+        patch[i] = (i % 97) / 97;
+      }
+      const start = Date.now();
+      const {embedding, moods} = await analyzeEmbeddingAndMoods([patch]);
+      const elapsedMs = Date.now() - start;
+      console.log('[tflite probe] embedding length', embedding.length);
+      console.log('[tflite probe] moods', moods);
+      console.log('[tflite probe] elapsed ms', elapsedMs);
+      Alert.alert(
+        'TFLite probe OK',
+        `embedding: float32[${embedding.length}]\n` +
+          `happy=${moods.happy.toFixed(3)} sad=${moods.sad.toFixed(3)}\n` +
+          `${elapsedMs}ms`,
+      );
+    } catch (e) {
+      console.log('[tflite probe] FAILED', e);
+      Alert.alert(
+        'TFLite probe failed',
+        e instanceof Error ? e.message : String(e),
+      );
+    } finally {
+      setTfliteProbing(false);
+    }
+  };
+
   return (
     <ScrollView
       style={styles.container}
@@ -219,6 +259,27 @@ export default function SettingsScreen({navigation}: Props) {
           )}
         </Pressable>
       </View>
+
+      {__DEV__ && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>TFLite probe (dev only)</Text>
+          <Text style={styles.sectionBody}>
+            Runs a fixed synthetic patch through the bundled embedding + mood
+            models to confirm react-native-fast-tflite loads and runs
+            on-device (Plan D Task 4). Not shown in release builds.
+          </Text>
+          <Pressable
+            style={[styles.button, styles.buttonSecondary, tfliteProbing && styles.buttonDisabled]}
+            disabled={tfliteProbing}
+            onPress={onRunTfliteProbe}>
+            {tfliteProbing ? (
+              <ActivityIndicator color={colors.textPrimary} />
+            ) : (
+              <Text style={styles.buttonSecondaryText}>Run TFLite probe</Text>
+            )}
+          </Pressable>
+        </View>
+      )}
     </ScrollView>
   );
 }
