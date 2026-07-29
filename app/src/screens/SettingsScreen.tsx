@@ -18,6 +18,7 @@ import {importVibesDb} from '../db/vibesDb';
 import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
 import {colors, radii, spacing, type} from '../ui/theme';
 import {analyzeEmbeddingAndMoods} from '../analyze/tflite';
+import {runMelFixtureParity, runRealSongDecodeSanity} from '../analyze/melParityHarness';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
@@ -28,6 +29,8 @@ export default function SettingsScreen({navigation}: Props) {
   const [loggedIn, setLoggedIn] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [tfliteProbing, setTfliteProbing] = useState(false);
+  const [melParityRunning, setMelParityRunning] = useState(false);
+  const [realSongProbing, setRealSongProbing] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -173,6 +176,58 @@ export default function SettingsScreen({navigation}: Props) {
     }
   };
 
+  // Task 5 THE PROOF (Plan D Phase 2): runs every golden fixture's PCM
+  // (pushed to the device -- see melParityHarness.ts's doc comment for the
+  // adb commands) through the native Kotlin mel port -> bundled TFLite
+  // embedding model, and compares each result to essentia's own embedding
+  // for that clip via cosine similarity. REQUIRES min cosine >= 0.99 across
+  // every fixture. __DEV__-gated; never shown in a release build.
+  const onRunMelParity = async () => {
+    setMelParityRunning(true);
+    try {
+      const {results, minCosine} = await runMelFixtureParity((clip, i, total) => {
+        console.log(`[mel parity] (${i + 1}/${total}) running ${clip}...`);
+      });
+      for (const r of results) {
+        console.log(`[mel parity] ${r.clip}: cosine=${r.cosine.toFixed(6)} (${r.numPatches} patches)`);
+      }
+      console.log(`[mel parity] MIN COSINE = ${minCosine.toFixed(6)} (gate: >= 0.99)`);
+      const lines = results.map(r => `${r.clip}: ${r.cosine.toFixed(4)}`).join('\n');
+      Alert.alert(
+        minCosine >= 0.99 ? 'Mel parity PASSED' : 'Mel parity FAILED',
+        `min cosine = ${minCosine.toFixed(6)}\n\n${lines}`,
+      );
+    } catch (e) {
+      console.log('[mel parity] FAILED', e);
+      Alert.alert('Mel parity probe failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      setMelParityRunning(false);
+    }
+  };
+
+  // Sanity-checks the PRODUCTION decode path (decodeToPcm's MediaCodec
+  // decode + resample + middle-120s-slice) end-to-end on a real downloaded
+  // song from the synced library. No essentia reference for this clip --
+  // only checks the pipeline runs and produces non-degenerate output.
+  const onRunRealSongSanity = async () => {
+    setRealSongProbing(true);
+    try {
+      const result = await runRealSongDecodeSanity();
+      console.log('[real song sanity]', result);
+      Alert.alert(
+        'Real-song decode sanity OK',
+        `videoId=${result.videoId}\npatches=${result.numPatches}\n` +
+          `embedding norm=${result.embeddingNorm.toFixed(3)}\n` +
+          `happy=${result.moods.happy.toFixed(3)} sad=${result.moods.sad.toFixed(3)}`,
+      );
+    } catch (e) {
+      console.log('[real song sanity] FAILED', e);
+      Alert.alert('Real-song decode sanity failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      setRealSongProbing(false);
+    }
+  };
+
   return (
     <ScrollView
       style={styles.container}
@@ -276,6 +331,51 @@ export default function SettingsScreen({navigation}: Props) {
               <ActivityIndicator color={colors.textPrimary} />
             ) : (
               <Text style={styles.buttonSecondaryText}>Run TFLite probe</Text>
+            )}
+          </Pressable>
+        </View>
+      )}
+
+      {__DEV__ && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Mel parity probe (dev only)</Text>
+          <Text style={styles.sectionBody}>
+            THE Plan D Task 5 proof: runs the native Kotlin mel port on every
+            golden fixture's PCM and compares its TFLite embedding to
+            essentia's via cosine similarity (gate: min cosine {'>='} 0.99).
+            Requires the fixture files pushed to the device first. Not shown
+            in release builds.
+          </Text>
+          <Pressable
+            style={[styles.button, styles.buttonSecondary, melParityRunning && styles.buttonDisabled]}
+            disabled={melParityRunning}
+            onPress={onRunMelParity}>
+            {melParityRunning ? (
+              <ActivityIndicator color={colors.textPrimary} />
+            ) : (
+              <Text style={styles.buttonSecondaryText}>Run mel fixtures parity</Text>
+            )}
+          </Pressable>
+        </View>
+      )}
+
+      {__DEV__ && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Real-song decode sanity (dev only)</Text>
+          <Text style={styles.sectionBody}>
+            Resolves + downloads the first synced song, runs the full
+            production decode path (MediaCodec -{'>'} mel -{'>'} embedding +
+            moods) end to end. No essentia reference for this clip -- sanity
+            only. Not shown in release builds.
+          </Text>
+          <Pressable
+            style={[styles.button, styles.buttonSecondary, realSongProbing && styles.buttonDisabled]}
+            disabled={realSongProbing}
+            onPress={onRunRealSongSanity}>
+            {realSongProbing ? (
+              <ActivityIndicator color={colors.textPrimary} />
+            ) : (
+              <Text style={styles.buttonSecondaryText}>Run real-song decode sanity</Text>
             )}
           </Pressable>
         </View>

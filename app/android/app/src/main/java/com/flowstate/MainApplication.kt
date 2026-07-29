@@ -16,6 +16,9 @@ class MainApplication : Application(), ReactApplication {
         PackageList(this).packages.apply {
           // Packages that cannot be autolinked yet can be added manually here, for example:
           // add(MyReactNativePackage())
+          // Plan D Task 5: native Kotlin audio decode + MusiCNN mel (not an
+          // npm package, so autolinking never picks it up).
+          add(AudioMelPackage())
         },
     )
   }

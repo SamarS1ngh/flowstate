@@ -132,7 +132,21 @@ export async function runEmbedding(patches: Float32Array[]): Promise<Float32Arra
       );
     }
     const [output] = await embedding.run([patch.buffer as ArrayBuffer]);
-    outputs.push(new Float32Array(output));
+    // .slice() is REQUIRED, not cosmetic: `new Float32Array(output)` is a
+    // zero-copy VIEW when `output` is an ArrayBuffer (react-native-fast-tflite
+    // reuses the same native output buffer across .run() calls) -- without a
+    // copy, every entry in `outputs` ends up aliasing the SAME underlying
+    // memory, so by the time meanPool() runs, all entries silently read back
+    // as the LAST patch's values (meanPool of N aliases of the same array is
+    // just that array). Confirmed on-device (Task 5): this collapsed the
+    // pooled embedding to patch[last]'s output alone, which happened to look
+    // fine (~0.99+ cosine) for near-stationary fixtures whose patches barely
+    // differ from each other, but was caught by the `sweep_50_7900hz` chirp
+    // fixture (patches vary a lot -- cosine 0.6954 before this fix, ~1.0 after).
+    // `.slice()` forces an independent copy (new buffer, byteOffset 0) at the
+    // moment each result is read, before the next .run() call can overwrite it.
+    const outArr = new Float32Array(output).slice();
+    outputs.push(outArr);
   }
   return meanPool(outputs, EMBEDDING_DIM);
 }

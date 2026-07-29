@@ -120,4 +120,9 @@ dependencies {
     } else {
         implementation jscFlavor
     }
+
+    // Plan D Task 5: plain-JVM unit tests for the Kotlin FFT/mel port
+    // (com.flowstate.audiomel) -- no Android runtime/Robolectric needed,
+    // these classes have zero android.* dependencies.
+    testImplementation("junit:junit:4.13.2")
 }
