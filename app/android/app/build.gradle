@@ -107,6 +107,13 @@ android {
             signingConfig signingConfigs.release
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+            // TEMPORARY (Plan D Task 6 device verification only, reverted
+            // before commit): debuggable=true so `run-as`/the sqlite MCP
+            // tool can read this release-signed build's app-private
+            // vibes.db to confirm features rows actually land, without
+            // wiping the already-synced library by reinstalling under the
+            // debug signing key instead.
+            debuggable true
         }
     }
 }

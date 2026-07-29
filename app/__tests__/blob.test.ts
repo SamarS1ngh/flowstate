@@ -37,3 +37,23 @@ test('rejects ArrayBufferView with wrong byte length', () => {
   const view = new Uint8Array(buf, 0, 400);
   expect(() => embeddingFromBlob(view)).toThrow(/800/);
 });
+
+// Plan D Task 6: vibesDb.ts's storeFeatures (the analyzer's writer) hands
+// op-sqlite a bare Float32Array(200) -- one of op-sqlite's supported Scalar
+// bind-param types (ArrayBufferView) -- rather than manually packing bytes,
+// trusting op-sqlite to bind it as an 800-byte little-endian BLOB as-is.
+// This confirms that exact writer shape survives this reader (getVibeSongs'
+// embeddingFromBlob) round-trip: a Float32Array IS the little-endian byte
+// layout embeddingFromBlob expects on every platform this app targets
+// (Android/ARM + iOS arm64/x86_64 are all little-endian), so feeding one
+// straight into the reader is equivalent to what a real sqlite round-trip
+// produces.
+test('a Float32Array(200), as handed to op-sqlite by vibesDb.storeFeatures, round-trips through embeddingFromBlob unchanged', () => {
+  const written = new Float32Array(200);
+  for (let i = 0; i < 200; i++) written[i] = Math.sin(i * 0.017) * 3.5;
+
+  const read = embeddingFromBlob(written);
+
+  expect(read.length).toBe(200);
+  expect(Array.from(read)).toEqual(Array.from(written));
+});

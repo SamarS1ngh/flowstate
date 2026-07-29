@@ -62,6 +62,20 @@ function createSchemaIfMissing(db: DB): void {
   }
 }
 
+// The 7 mood keys tflite.ts's analyzeEmbeddingAndMoods produces, in the same
+// order storeFeatures/rowToVibeSong reference them. Exported so analyzer.ts
+// and its tests can validate a moods object shape without duplicating this
+// list.
+export const MOOD_KEYS = [
+  'happy',
+  'sad',
+  'relaxed',
+  'aggressive',
+  'danceable',
+  'acoustic',
+  'party',
+] as const;
+
 const SONG_COLS = `s.video_id, s.title, s.artist, s.duration_s,
   EXISTS(SELECT 1 FROM features f WHERE f.video_id = s.video_id) AS has_vibe`;
 
@@ -198,6 +212,71 @@ export class VibesDb {
             [playlistId, limit],
           );
     return res.rows.map((r: any) => r.video_id);
+  }
+
+  // Plan D Task 6: on-device analyzer writer path. `hasFeatures` is the
+  // skip-if-already-analyzed check analyzer.ts runs before doing any
+  // expensive work (download/decode/infer); `storeFeatures` is the writer,
+  // shaped to mirror the exact column list importVibesDb's merge already
+  // uses above (video_id, embedding, 7 moods, bpm/energy/key). bpm/energy/key
+  // stay NULL -- MusiCNN (the on-device model) only produces an embedding +
+  // mood scores, matching the Global Constraints note that v1's rhythm/key
+  // extraction was never ported since the vibe engine only reads
+  // embedding+moods (see engine/similarity.ts).
+  hasFeatures(videoId: string): boolean {
+    const res = this.db.executeSync(`SELECT 1 FROM features WHERE video_id = ?`, [videoId]);
+    return res.rows.length > 0;
+  }
+
+  // `embedding` is handed to op-sqlite as a bare Float32Array (an
+  // ArrayBufferView, one of op-sqlite's supported Scalar param types) rather
+  // than manually packed into a Uint8Array/base64 -- op-sqlite binds it as
+  // an 800-byte little-endian BLOB as-is, which is exactly the byte layout
+  // db/blob.ts's embeddingFromBlob (the read side, used by getVibeSongs)
+  // already expects. `moods` must carry all 7 keys tflite.ts's
+  // analyzeEmbeddingAndMoods produces (happy/sad/relaxed/aggressive/
+  // danceable/acoustic/party) -- see __tests__/analyzer.test.ts for the
+  // param-shape unit coverage of this mapping.
+  storeFeatures(videoId: string, embedding: Float32Array, moods: Record<string, number>): void {
+    if (embedding.length !== 200) {
+      throw new Error(`storeFeatures: embedding must be length 200 (float32), got ${embedding.length}`);
+    }
+    for (const key of MOOD_KEYS) {
+      if (typeof moods[key] !== 'number') {
+        throw new Error(`storeFeatures: moods.${key} missing or not a number`);
+      }
+    }
+    this.db.executeSync(
+      `INSERT OR REPLACE INTO features
+       (video_id, embedding, mood_happy, mood_sad, mood_relaxed, mood_aggressive,
+        danceable, acoustic, party, bpm, energy, key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+      [
+        videoId,
+        embedding,
+        moods.happy,
+        moods.sad,
+        moods.relaxed,
+        moods.aggressive,
+        moods.danceable,
+        moods.acoustic,
+        moods.party,
+      ],
+    );
+  }
+
+  // Generic single-row key/value stamp -- analyzer.ts uses this to record
+  // which model produced the features currently in this db ('model_version'
+  // -> 'msd-musicnn-1'), so a future model swap can tell which rows need
+  // re-analysis. Shares the same `meta` table schema_version already lives
+  // in (createSchemaIfMissing above).
+  setMeta(key: string, value: string): void {
+    this.db.executeSync(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`, [key, value]);
+  }
+
+  getMeta(key: string): string | null {
+    const res = this.db.executeSync(`SELECT value FROM meta WHERE key = ?`, [key]);
+    return res.rows.length ? (res.rows[0] as any).value : null;
   }
 
   // Raw handle so FeedbackStore (a thin op-sqlite adapter of its own) can

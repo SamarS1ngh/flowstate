@@ -1,4 +1,4 @@
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -17,6 +17,7 @@ import {SimpleQueue} from '../player/queue';
 import {VibeQueue} from '../engine/vibeQueue';
 import {VibeSong} from '../engine/similarity';
 import {FeedbackStore} from '../engine/feedbackStore';
+import {analyzeSong, analyzeMany, AnalyzeManyHandle} from '../analyze/analyzer';
 import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
@@ -43,6 +44,12 @@ export default function PlaylistScreen({route, navigation}: Props) {
   const [vibeMode, setVibeMode] = useState(false);
   const [startingId, setStartingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Plan D Task 6: batch "Analyze playlist" progress. `analyzeHandleRef`
+  // (rather than state) holds the live AnalyzeManyHandle so onCancelAnalyze
+  // and the already-running guard in onAnalyzePlaylist always see the
+  // current handle synchronously, without waiting on a state update.
+  const [analyzeProgress, setAnalyzeProgress] = useState<{done: number; total: number} | null>(null);
+  const analyzeHandleRef = useRef<AnalyzeManyHandle | null>(null);
 
   // Brief, auto-dismissing in-screen notice (no toast dependency in this
   // app) -- currently only used for the "vibe ON but this song isn't
@@ -80,11 +87,70 @@ export default function PlaylistScreen({route, navigation}: Props) {
     };
   }, [playlistId]);
 
+  // Cancel any in-flight batch analysis if the user navigates away, so it
+  // doesn't keep burning CPU/network for a screen nobody's looking at.
+  useEffect(() => {
+    return () => {
+      analyzeHandleRef.current?.cancel();
+    };
+  }, []);
+
+  // Re-reads songs + vibeSongs from the db -- called after any analysis
+  // (lazy on-play or batch) writes a new features row, so "N analyzed",
+  // the ♪? badges, and the Vibe shuffle button's enabled state all stay
+  // live without a manual screen refresh.
+  const refreshAnalyzed = async (targetDb?: VibesDb) => {
+    const activeDb = targetDb ?? db;
+    if (!activeDb) return;
+    const list = playlistId === 'ALL' ? activeDb.getAllSongs() : activeDb.getPlaylistSongs(playlistId);
+    const analyzed = activeDb.getVibeSongs(playlistId);
+    setSongs(list);
+    setVibeSongs(analyzed);
+  };
+
+  const unanalyzedIds = useMemo(() => songs.filter(s => !s.hasVibe).map(s => s.videoId), [songs]);
+
+  // "Analyze playlist": batch-analyzes every not-yet-analyzed song in this
+  // playlist via analyzeMany (Task 6), so Vibe shuffle stops being gated on
+  // one song at a time getting lazily analyzed by chance of being played.
+  const onAnalyzePlaylist = () => {
+    if (analyzeHandleRef.current || unanalyzedIds.length === 0) return;
+    const total = unanalyzedIds.length;
+    setAnalyzeProgress({done: 0, total});
+    const handle = analyzeMany(unanalyzedIds, (done, doneTotal) => {
+      setAnalyzeProgress({done, total: doneTotal});
+      void refreshAnalyzed();
+    });
+    analyzeHandleRef.current = handle;
+    handle.promise.finally(() => {
+      analyzeHandleRef.current = null;
+      setAnalyzeProgress(null);
+      void refreshAnalyzed();
+    });
+  };
+
+  const onCancelAnalyze = () => {
+    analyzeHandleRef.current?.cancel();
+  };
+
   const playIndex = async (index: number) => {
     const song = songs[index];
     setStartingId(song.videoId);
     try {
       const seed = vibeSongs.find(v => v.videoId === song.videoId);
+      // Plan D Task 6 lazy scheduling: a song that starts playing but isn't
+      // analyzed yet gets queued for background analysis here -- entirely
+      // fire-and-forget (not awaited) so it can never delay or fail this
+      // song's own playback. analyzeSong's internal mutex means this simply
+      // takes its turn behind whatever else (a batch run, another lazy
+      // trigger) is already in flight, rather than fighting it for CPU.
+      if (!seed) {
+        analyzeSong(song.videoId)
+          .then(ok => {
+            if (ok) void refreshAnalyzed();
+          })
+          .catch(() => {});
+      }
       // Vibe mode only applies when the tapped song is analyzed -- an
       // unanalyzed seed has no embedding, and VibeQueue.reset() would throw
       // (see engine/vibeQueue.ts: reset requires the seed to be in scope).
@@ -206,6 +272,24 @@ export default function PlaylistScreen({route, navigation}: Props) {
                 <Chip label="Vibe mode: Off" active={!vibeMode} onPress={() => setVibeMode(false)} />
               </View>
 
+              {analyzeProgress ? (
+                <View style={styles.analyzeRow}>
+                  <ActivityIndicator color={colors.accent} size="small" />
+                  <Text style={styles.analyzeText}>
+                    Analyzing {analyzeProgress.done}/{analyzeProgress.total}…
+                  </Text>
+                  <Pressable onPress={onCancelAnalyze} hitSlop={8}>
+                    <Text style={styles.cancelText}>Cancel</Text>
+                  </Pressable>
+                </View>
+              ) : unanalyzedIds.length > 0 ? (
+                <Pressable style={styles.analyzeRow} onPress={onAnalyzePlaylist}>
+                  <Text style={styles.analyzeButtonText}>
+                    Analyze playlist ({unanalyzedIds.length} left)
+                  </Text>
+                </Pressable>
+              ) : null}
+
               {notice ? (
                 <View style={styles.noticeBanner}>
                   <Text style={styles.noticeText}>{notice}</Text>
@@ -275,4 +359,13 @@ const styles = StyleSheet.create({
   },
   noticeBanner: {marginTop: spacing.md},
   noticeText: {color: colors.textTertiary, fontSize: 12, textAlign: 'center'},
+  analyzeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: spacing.lg,
+    gap: spacing.sm,
+  },
+  analyzeText: {color: colors.textSecondary, fontSize: 13},
+  analyzeButtonText: {color: colors.textSecondary, fontSize: 13, textDecorationLine: 'underline'},
+  cancelText: {color: colors.textTertiary, fontSize: 13, fontWeight: '700'},
 });
