@@ -9,7 +9,7 @@ module.exports = {
   // relative imports) instead of leaving raw `import` syntax, which Jest's
   // default node_modules exclusion would otherwise choke on.
   transformIgnorePatterns: [
-    'node_modules/(?!(youtubei\\.js|(jest-)?react-native|@react-native(-community)?|@react-native-async-storage)/)',
+    'node_modules/(?!(youtubei\\.js|(jest-)?react-native|@react-native(-community)?|@react-native-async-storage|@dr\\.pogodin/react-native-fs)/)',
   ],
   // react-native-fast-tflite's models are loaded via require('./model.tflite')
   // (a Metro asset, see metro.config.js's assetExts addition). Jest doesn't

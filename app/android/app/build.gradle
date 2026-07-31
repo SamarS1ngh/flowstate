@@ -82,8 +82,8 @@ android {
         applicationId "com.flowstate"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 3
-        versionName "0.2.1-alpha"
+        versionCode 4
+        versionName "0.3.0-alpha"
     }
     signingConfigs {
         debug {
@@ -107,13 +107,15 @@ android {
             signingConfig signingConfigs.release
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
-            // TEMPORARY (Plan D Task 6 device verification only, reverted
-            // before commit): debuggable=true so `run-as`/the sqlite MCP
-            // tool can read this release-signed build's app-private
-            // vibes.db to confirm features rows actually land, without
-            // wiping the already-synced library by reinstalling under the
-            // debug signing key instead.
-            debuggable true
+            // Plan D Task 7: restrict the release APK's native libs to
+            // arm64-v8a only. The target device (and virtually all modern
+            // Android phones) is arm64; shipping armeabi-v7a/x86/x86_64 too
+            // was bloating the release APK to ~140MB for ABIs nobody runs.
+            // Scoped to the release buildType only so debug builds (e.g.
+            // on an x86_64 emulator) are unaffected.
+            ndk {
+                abiFilters "arm64-v8a"
+            }
         }
     }
 }

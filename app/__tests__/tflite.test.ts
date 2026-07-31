@@ -15,6 +15,18 @@ jest.mock('react-native-fast-tflite', () => ({
   loadTensorflowModel: jest.fn(),
 }));
 
+// Same story as react-native-fast-tflite above: @dr.pogodin/react-native-fs
+// resolves its native TurboModule eagerly at import time too, so importing
+// tflite.ts (which uses RNFS to copy bundled model assets into app storage)
+// would otherwise throw under Jest. Mock it; tflite.ts's RNFS calls are
+// device-only and exercised by the on-device probe, not unit tested here.
+jest.mock('@dr.pogodin/react-native-fs', () => ({
+  DocumentDirectoryPath: '/mock/documents',
+  mkdir: jest.fn().mockResolvedValue(undefined),
+  exists: jest.fn().mockResolvedValue(true),
+  copyFileAssets: jest.fn().mockResolvedValue(undefined),
+}));
+
 import {loadTensorflowModel} from 'react-native-fast-tflite';
 import {loadModels, meanPool, pickMood, POSITIVE_INDEX, runEmbedding} from '../src/analyze/tflite';
 
