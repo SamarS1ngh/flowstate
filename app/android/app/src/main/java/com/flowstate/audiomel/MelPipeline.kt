@@ -67,23 +67,54 @@ object MelPipeline {
      * One frame (length FRAME_SIZE) -> 96 mel bands, essentia recipe: Hann
      * window -> |FFT| magnitude spectrum -> square (power) -> mel filterbank
      * -> shift*scale+1 -> log10. Pure function, filterbank injected so it's
-     * independently JVM-testable without an Android asset/Context.
+     * independently JVM-testable without an Android asset/Context. Allocates
+     * its own scratch buffers -- see `audioToMel` for the allocation-reusing
+     * hot path this delegates to (`frameToMelBandsInto`); this wrapper stays
+     * around unchanged so any existing caller/test keeps working exactly as
+     * before.
      */
     fun frameToMelBands(frame: DoubleArray, filterbank: Array<DoubleArray>): FloatArray {
-        require(frame.size == FRAME_SIZE) { "frame must be length $FRAME_SIZE, got ${frame.size}" }
         val re = DoubleArray(FRAME_SIZE)
         val im = DoubleArray(FRAME_SIZE)
-        for (i in 0 until FRAME_SIZE) re[i] = frame[i] * window[i]
+        val power = DoubleArray(N_BINS)
+        val out = FloatArray(N_MELS)
+        frameToMelBandsInto(frame, filterbank, re, im, power, out)
+        return out
+    }
+
+    /**
+     * Same computation as `frameToMelBands`, but writes into caller-supplied
+     * scratch buffers instead of allocating fresh ones. Perf (Plan D Task
+     * 6b): `audioToMel` calls this once per frame (thousands of times for a
+     * 120s clip); allocating 3 arrays per call was measurable GC pressure on
+     * a budget device. Buffers are fully overwritten every call (re/im/power
+     * have no stale-data carryover across frames -- `im` in particular is
+     * explicitly zeroed since `Fft.fft` mutates it in place), so reuse is
+     * numerically identical to allocating fresh, and each caller's own local
+     * buffers keep this safe under concurrent calls (no shared mutable state
+     * on the `MelPipeline` object itself).
+     */
+    private fun frameToMelBandsInto(
+        frame: DoubleArray,
+        filterbank: Array<DoubleArray>,
+        re: DoubleArray,
+        im: DoubleArray,
+        power: DoubleArray,
+        out: FloatArray,
+    ) {
+        require(frame.size == FRAME_SIZE) { "frame must be length $FRAME_SIZE, got ${frame.size}" }
+        for (i in 0 until FRAME_SIZE) {
+            re[i] = frame[i] * window[i]
+            im[i] = 0.0
+        }
         Fft.fft(re, im)
 
         // power = |rfft|^2 == re^2+im^2 directly (skips an unneeded
         // sqrt-then-square roundtrip vs. mel_reference.py's
         // `np.abs(rfft)**2`; mathematically identical, marginally more
         // precise).
-        val power = DoubleArray(N_BINS)
         for (i in 0 until N_BINS) power[i] = re[i] * re[i] + im[i] * im[i]
 
-        val out = FloatArray(N_MELS)
         for (m in 0 until N_MELS) {
             val row = filterbank[m]
             var sum = 0.0
@@ -91,14 +122,20 @@ object MelPipeline {
             val shifted = sum * LOG_SCALE + LOG_SHIFT
             out[m] = log10(max(shifted, LOG_FLOOR)).toFloat()
         }
-        return out
     }
 
     /** Full mel pipeline: 16kHz mono audio -> (n_frames, 96) mel bands. */
     fun audioToMel(audio: FloatArray, filterbank: Array<DoubleArray>): Array<FloatArray> {
         val audioD = DoubleArray(audio.size) { audio[it].toDouble() }
         val frames = frameSignal(audioD)
-        return Array(frames.size) { i -> frameToMelBands(frames[i], filterbank) }
+        val re = DoubleArray(FRAME_SIZE)
+        val im = DoubleArray(FRAME_SIZE)
+        val power = DoubleArray(N_BINS)
+        return Array(frames.size) { i ->
+            val out = FloatArray(N_MELS)
+            frameToMelBandsInto(frames[i], filterbank, re, im, power, out)
+            out
+        }
     }
 
     /**

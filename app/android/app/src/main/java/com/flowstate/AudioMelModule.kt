@@ -92,4 +92,37 @@ class AudioMelModule(reactContext: ReactApplicationContext) : ReactContextBaseJa
             }
         }.start()
     }
+
+    /**
+     * Perf (Plan D Task 6b): the production path used to chain decodeToPcm()
+     * -> JS base64-decodes the ~120s PCM payload -> computeMel() -> JS
+     * base64-RE-ENCODES that same PCM to hand it straight back to native.
+     * That round-trips a multi-megabyte buffer across the bridge as a base64
+     * string TWICE even though JS never actually inspects the PCM -- it's
+     * only ever forwarded on. This does decode+slice+mel in one native call
+     * so PCM never crosses the bridge at all; only the far smaller mel
+     * patches payload does. `decodeToPcm`/`computeMel` above are kept
+     * as-is (not replaced) because the on-device parity harness legitimately
+     * needs to feed externally-sourced (golden fixture) PCM in from JS.
+     */
+    @ReactMethod
+    fun decodeAndComputeMel(path: String, promise: Promise) {
+        Thread {
+            try {
+                val filterbank = FilterbankAsset.get(reactApplicationContext)
+                val pcm = AudioDecoder.decodeToMonoPcm16k(path)
+                val sliced = MiddleSlice.take(pcm, TARGET_SAMPLE_RATE, MIDDLE_SLICE_SECONDS)
+                val mel = MelPipeline.audioToMel(sliced, filterbank)
+                val patches = MelPipeline.melToPatches(mel)
+                val flat = MelPipeline.flattenPatches(patches)
+                val result = Arguments.createMap()
+                result.putInt("numFrames", mel.size)
+                result.putInt("numPatches", patches.size)
+                result.putString("patchesBase64", FloatCodec.encode(flat))
+                promise.resolve(result)
+            } catch (e: Exception) {
+                promise.reject("audio_mel_decode_error", e.message ?: e.toString(), e)
+            }
+        }.start()
+    }
 }

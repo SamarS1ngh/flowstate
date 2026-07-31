@@ -108,8 +108,51 @@ async function analyzeSongUncached(videoId: string): Promise<boolean> {
   return runExclusive(() => doAnalyze(videoId));
 }
 
+// Per-stage timeouts (Plan D Task 6b): a batch "Analyze playlist" run must
+// never hang on one bad song -- a stuck network read, a stream host that
+// never responds, or a corrupt file that wedges the native decoder should
+// fail THAT song (doAnalyze's existing catch-all already turns any thrown
+// error into `false`, logged and cleanup-then-continue) rather than stall
+// every song queued behind it. Budgets are generous relative to the ~20-30s/
+// song target this task aims for, so they only fire on genuinely stuck
+// stages, not slow-but-progressing ones. Note a timeout doesn't cancel the
+// underlying native/network work (neither RNFS nor the AudioMel native
+// module expose cancellation) -- it just stops THIS call from waiting on it,
+// which is what keeps the batch moving; the abandoned work finishes (or
+// fails) on its own with no further effect since nothing awaits it anymore.
+const STAGE_TIMEOUT_MS = {
+  resolve: 20_000,
+  download: 60_000,
+  decode: 60_000,
+  infer: 30_000,
+} as const;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, stage: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`analyzeSong: stage '${stage}' timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      value => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      error => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 async function doAnalyze(videoId: string): Promise<boolean> {
   let tempPath: string | undefined;
+  // __DEV__-gated stage timing (Plan D Task 6b): cheap enough to leave in
+  // permanently (a handful of Date.now() calls + one console.log per song),
+  // and stripped from release builds automatically since __DEV__ is
+  // compiled out -- see the Task 6b report for the profiled breakdown this
+  // produced on-device.
+  const t0 = __DEV__ ? Date.now() : 0;
   try {
     const db = await ensureBaseSchema();
     try {
@@ -118,26 +161,43 @@ async function doAnalyze(videoId: string): Promise<boolean> {
       // was waiting its turn.
       if (db.hasFeatures(videoId)) return true;
 
-      const stream = await resolveStreamUrl(videoId);
+      const stream = await withTimeout(resolveStreamUrl(videoId), STAGE_TIMEOUT_MS.resolve, 'resolve');
+      const tResolve = __DEV__ ? Date.now() : 0;
+
       tempPath = tempAudioPath(videoId);
       const {promise} = RNFS.downloadFile({
         fromUrl: stream.url,
         toFile: tempPath,
         headers: stream.headers,
       });
-      const result = await promise;
+      const result = await withTimeout(promise, STAGE_TIMEOUT_MS.download, 'download');
       if (result.statusCode < 200 || result.statusCode >= 300) {
         throw new Error(`download failed: HTTP ${result.statusCode}`);
       }
+      const tDownload = __DEV__ ? Date.now() : 0;
 
-      const patches = await decodeAndMel(tempPath);
+      const patches = await withTimeout(decodeAndMel(tempPath), STAGE_TIMEOUT_MS.decode, 'decode');
       if (patches.length === 0) {
         throw new Error('decodeAndMel produced 0 mel patches (silent, too-short, or undecodable audio)');
       }
+      const tDecode = __DEV__ ? Date.now() : 0;
 
-      const {embedding, moods} = await analyzeEmbeddingAndMoods(patches);
+      const {embedding, moods} = await withTimeout(
+        analyzeEmbeddingAndMoods(patches),
+        STAGE_TIMEOUT_MS.infer,
+        'infer',
+      );
+      const tInfer = __DEV__ ? Date.now() : 0;
+
       db.storeFeatures(videoId, embedding, moods);
       db.setMeta('model_version', MODEL_VERSION);
+      if (__DEV__) {
+        console.log(
+          `[analyzer] ${videoId} stage timings (ms): resolve=${tResolve - t0} ` +
+            `download=${tDownload - tResolve} decode+mel=${tDecode - tDownload} ` +
+            `infer=${tInfer - tDecode} total=${tInfer - t0} patches=${patches.length}`,
+        );
+      }
       return true;
     } finally {
       db.close();

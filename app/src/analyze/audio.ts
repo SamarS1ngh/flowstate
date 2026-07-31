@@ -19,6 +19,14 @@ const {AudioMel} = NativeModules as {
     computeMel(
       pcmBase64: string,
     ): Promise<{numFrames: number; numPatches: number; patchesBase64: string}>;
+    // Plan D Task 6b perf: decode+slice+mel in one native call, so the ~120s
+    // PCM buffer never crosses the bridge as JS-visible base64 at all (see
+    // decodeAndMel below). decodeToPcm/computeMel above stay as separate
+    // steps for the fixture-driven parity harness, which needs externally
+    // -sourced PCM to legitimately cross from JS.
+    decodeAndComputeMel(
+      path: string,
+    ): Promise<{numFrames: number; numPatches: number; patchesBase64: string}>;
   };
 };
 
@@ -93,10 +101,20 @@ export async function computeMelFromPcm(pcm: Float32Array): Promise<Float32Array
  * Full production path: decode a local audio file (path from RN's
  * filesystem, e.g. a downloaded m4a) to 16kHz mono PCM (middle-120s-sliced
  * by the native side) and compute its MusiCNN mel patches.
+ *
+ * Plan D Task 6b perf: this used to be `decodeToPcm` (native decode -> base64
+ * -> JS Float32Array) followed by `computeMelFromPcm` (JS Float32Array ->
+ * base64 -> native mel) -- round-tripping the ~120s PCM buffer (~7.5MB raw,
+ * ~10MB as base64) across the bridge TWICE even though JS never does
+ * anything with it except hand it straight back. `decodeAndComputeMel` does
+ * decode+slice+mel in one native call instead, so only the much smaller mel
+ * patches payload (a few MB, not ~20MB of round-tripped base64) ever crosses
+ * the bridge.
  */
 export async function decodeAndMel(path: string): Promise<Float32Array[]> {
   const native = requireNativeModule();
-  const {pcmBase64} = await native.decodeToPcm(path);
-  const pcm = base64ToFloat32Array(pcmBase64);
-  return computeMelFromPcm(pcm);
+  const {numPatches, patchesBase64} = await native.decodeAndComputeMel(path);
+  if (numPatches === 0) return [];
+  const flat = base64ToFloat32Array(patchesBase64);
+  return splitPatches(flat, numPatches);
 }
