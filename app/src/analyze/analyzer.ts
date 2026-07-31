@@ -122,7 +122,7 @@ async function analyzeSongUncached(videoId: string): Promise<boolean> {
 // fails) on its own with no further effect since nothing awaits it anymore.
 const STAGE_TIMEOUT_MS = {
   resolve: 20_000,
-  download: 150_000,
+  download: 90_000,
   decode: 60_000,
   infer: 30_000,
 } as const;
