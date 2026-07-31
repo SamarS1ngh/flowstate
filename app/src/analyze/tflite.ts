@@ -1,23 +1,46 @@
 import {loadTensorflowModel, TensorflowModel} from 'react-native-fast-tflite';
+import * as RNFS from '@dr.pogodin/react-native-fs';
 
-// Embedding model: msd-musicnn-1. Input `model/Placeholder` [1,187,96] float32
-// (one mel patch), output [1,200] float32 (per Task 4 parity gate, commit
-// 130ab47). Bundled via Metro's `require()` asset mechanism -- see
-// metro.config.js's `assetExts` addition for `tflite`.
-const EMBEDDING_MODEL = require('./models/msd-musicnn-1.tflite');
+// Models are shipped as real Android assets under `assets/models/` (copied
+// there from `src/analyze/models/` -- see android/app/src/main/assets/models).
+//
+// WHY NOT `require('./models/*.tflite')`: with `tflite` in metro assetExts,
+// require() bundles each model as an Android `raw` resource whose only handle
+// at runtime is a bare resource name ("src_analyze_models_msdmusicnn1", no
+// scheme). react-native-fast-tflite@3's native Android loader passes that
+// straight into `new URL(...)`, which throws `MalformedURLException: no
+// protocol: src_analyze_models_msdmusicnn1` -- so EVERY analyzeSong failed at
+// model load and zero features rows were ever written (caught on-device via
+// the debug-build logcat). fast-tflite explicitly supports `{ url: 'file://..'}`
+// (README), so instead we copy each bundled asset to the app's files dir once
+// and load it by real filesystem path.
+const EMBEDDING_ASSET = 'models/msd-musicnn-1.tflite';
 
 // One binary-softmax head per mood. Input is the pooled [1,200] embedding,
 // output [1,2] softmax over {class 0, class 1} -- see POSITIVE_INDEX below
 // for which index is the "positive" (mood-present) class per head.
-const HEAD_MODELS: Record<string, number> = {
-  happy: require('./models/mood_happy-msd-musicnn-1.tflite'),
-  sad: require('./models/mood_sad-msd-musicnn-1.tflite'),
-  relaxed: require('./models/mood_relaxed-msd-musicnn-1.tflite'),
-  aggressive: require('./models/mood_aggressive-msd-musicnn-1.tflite'),
-  acoustic: require('./models/mood_acoustic-msd-musicnn-1.tflite'),
-  party: require('./models/mood_party-msd-musicnn-1.tflite'),
-  danceable: require('./models/danceability-msd-musicnn-1.tflite'),
+const HEAD_ASSETS: Record<string, string> = {
+  happy: 'models/mood_happy-msd-musicnn-1.tflite',
+  sad: 'models/mood_sad-msd-musicnn-1.tflite',
+  relaxed: 'models/mood_relaxed-msd-musicnn-1.tflite',
+  aggressive: 'models/mood_aggressive-msd-musicnn-1.tflite',
+  acoustic: 'models/mood_acoustic-msd-musicnn-1.tflite',
+  party: 'models/mood_party-msd-musicnn-1.tflite',
+  danceable: 'models/danceability-msd-musicnn-1.tflite',
 };
+
+// Copy a bundled Android asset to the files dir (once) and return a
+// `file://` URL fast-tflite can load. Idempotent: skips the copy if the
+// destination already exists (models are immutable, shipped in the APK).
+async function assetToFileUrl(assetPath: string): Promise<{url: string}> {
+  const dest = `${RNFS.DocumentDirectoryPath}/${assetPath}`;
+  const destDir = dest.slice(0, dest.lastIndexOf('/'));
+  await RNFS.mkdir(destDir).catch(() => {});
+  if (!(await RNFS.exists(dest))) {
+    await RNFS.copyFileAssets(assetPath, dest);
+  }
+  return {url: `file://${dest}`};
+}
 
 // Per-head positive-class index, carried over from the v1 (Mac) analyzer --
 // see analyzer/flowstate_analyzer/features.py's MOOD_HEADS comment, sourced
@@ -51,11 +74,11 @@ let headModels: Record<string, TensorflowModel> | undefined;
 export async function loadModels(): Promise<void> {
   if (embeddingModel && headModels) return;
 
-  embeddingModel = await loadTensorflowModel(EMBEDDING_MODEL, []);
+  embeddingModel = await loadTensorflowModel(await assetToFileUrl(EMBEDDING_ASSET), []);
 
   const entries = await Promise.all(
-    Object.entries(HEAD_MODELS).map(async ([name, source]) => {
-      const model = await loadTensorflowModel(source, []);
+    Object.entries(HEAD_ASSETS).map(async ([name, assetPath]) => {
+      const model = await loadTensorflowModel(await assetToFileUrl(assetPath), []);
       return [name, model] as const;
     }),
   );

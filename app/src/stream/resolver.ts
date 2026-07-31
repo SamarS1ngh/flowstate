@@ -19,14 +19,22 @@ export interface AudioFormatLike {
   hasVideo: boolean;
 }
 
-export function pickAudioFormat<T extends AudioFormatLike>(formats: T[]): T {
+export function pickAudioFormat<T extends AudioFormatLike>(
+  formats: T[],
+  quality: 'highest' | 'lowest' = 'highest',
+): T {
   const audio = formats
     .filter(x => x.hasAudio && !x.hasVideo)
     .sort((a, b) => b.bitrate - a.bitrate);
   if (!audio.length) {
     throw new StreamResolveError('no audio-only format available');
   }
-  return audio[0];
+  // Playback wants the best-sounding stream (highest). Analysis downsamples
+  // to 16kHz mono regardless, so bitrate is irrelevant to the fingerprint --
+  // it wants the SMALLEST file to download fastest (googlevideo throttles a
+  // full-file GET to ~playback speed, so a high-bitrate stream can blow past
+  // the download timeout on a slow link). 'lowest' picks the smallest audio.
+  return quality === 'lowest' ? audio[audio.length - 1] : audio[0];
 }
 
 // Root-cause note (post-login playback regression): this resolver has
@@ -156,7 +164,11 @@ async function validateUrl(url: string, headers: Record<string, string>): Promis
   }
 }
 
-export async function resolveStreamUrl(videoId: string): Promise<ResolvedStream> {
+export async function resolveStreamUrl(
+  videoId: string,
+  opts: {quality?: 'highest' | 'lowest'} = {},
+): Promise<ResolvedStream> {
+  const quality = opts.quality ?? 'highest';
   let tube: Innertube;
   try {
     tube = await innertube();
@@ -180,7 +192,7 @@ export async function resolveStreamUrl(videoId: string): Promise<ResolvedStream>
         hasVideo: raw.has_video,
         raw,
       }));
-      const picked = pickAudioFormat(candidates);
+      const picked = pickAudioFormat(candidates, quality);
       // In this version, Format#decipher is async and accepts the session's
       // Player (rather than being a sync method guarded by an `if` check as
       // in older API sketches); it returns the plain `url` untouched when no

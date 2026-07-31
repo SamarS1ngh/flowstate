@@ -122,7 +122,7 @@ async function analyzeSongUncached(videoId: string): Promise<boolean> {
 // fails) on its own with no further effect since nothing awaits it anymore.
 const STAGE_TIMEOUT_MS = {
   resolve: 20_000,
-  download: 60_000,
+  download: 150_000,
   decode: 60_000,
   infer: 30_000,
 } as const;
@@ -161,14 +161,29 @@ async function doAnalyze(videoId: string): Promise<boolean> {
       // was waiting its turn.
       if (db.hasFeatures(videoId)) return true;
 
-      const stream = await withTimeout(resolveStreamUrl(videoId), STAGE_TIMEOUT_MS.resolve, 'resolve');
+      // 'lowest' bitrate: analysis downsamples to 16kHz mono, so audio
+      // quality is irrelevant to the fingerprint but download SIZE is the
+      // dominant per-song cost -- the smallest audio format is fastest.
+      const stream = await withTimeout(
+        resolveStreamUrl(videoId, {quality: 'lowest'}),
+        STAGE_TIMEOUT_MS.resolve,
+        'resolve',
+      );
       const tResolve = __DEV__ ? Date.now() : 0;
 
       tempPath = tempAudioPath(videoId);
       const {promise} = RNFS.downloadFile({
         fromUrl: stream.url,
         toFile: tempPath,
-        headers: stream.headers,
+        // A BOUNDED range (`bytes=0-N`, not open-ended `bytes=0-`) defeats
+        // googlevideo's stream throttling: an open-ended range is served at
+        // ~playback speed (so a multi-minute track blows past the download
+        // timeout -- the real cause of "analysis is so slow": every song was
+        // failing on download, not analyzing), while a bounded range is
+        // delivered in one fast burst. 12MB comfortably covers the whole of
+        // any lowest-bitrate audio-only track (a 10-min track at 64kbps is
+        // ~4.8MB); the server just caps at the real file end if smaller.
+        headers: {...stream.headers, Range: 'bytes=0-12582911'},
       });
       const result = await withTimeout(promise, STAGE_TIMEOUT_MS.download, 'download');
       if (result.statusCode < 200 || result.statusCode >= 300) {
