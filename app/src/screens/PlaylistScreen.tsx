@@ -17,7 +17,14 @@ import {SimpleQueue} from '../player/queue';
 import {VibeQueue} from '../engine/vibeQueue';
 import {VibeSong} from '../engine/similarity';
 import {FeedbackStore} from '../engine/feedbackStore';
-import {analyzeSong, analyzeMany, AnalyzeManyHandle} from '../analyze/analyzer';
+import {
+  analyzeSong,
+  startAnalysisBatch,
+  cancelAnalysisBatch,
+  retryFailedAnalysis,
+  subscribeAnalysisBatch,
+  type BatchState,
+} from '../analyze/analyzer';
 import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
@@ -41,15 +48,18 @@ export default function PlaylistScreen({route, navigation}: Props) {
   const [vibeSongs, setVibeSongs] = useState<VibeSong[]>([]);
   const [coverIds, setCoverIds] = useState<string[]>([]);
   const [db, setDb] = useState<VibesDb | null>(null);
+  // Mirror of `db` readable synchronously from the batch subscription's
+  // refresh callback (which is set up in a [playlistId] effect and would
+  // otherwise capture a stale db=null from first render).
+  const dbRef = useRef<VibesDb | null>(null);
   const [vibeMode, setVibeMode] = useState(false);
   const [startingId, setStartingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // Plan D Task 6: batch "Analyze playlist" progress. `analyzeHandleRef`
-  // (rather than state) holds the live AnalyzeManyHandle so onCancelAnalyze
-  // and the already-running guard in onAnalyzePlaylist always see the
-  // current handle synchronously, without waiting on a state update.
-  const [analyzeProgress, setAnalyzeProgress] = useState<{done: number; total: number} | null>(null);
-  const analyzeHandleRef = useRef<AnalyzeManyHandle | null>(null);
+  // Batch "Analyze playlist" progress now lives in a module-level controller
+  // (analyzer.ts) so it SURVIVES navigating away from this screen -- we just
+  // mirror its state here. `batch` is the global batch; it's only *this*
+  // screen's batch when batch.playlistId === playlistId.
+  const [batch, setBatch] = useState<BatchState | null>(null);
 
   // Brief, auto-dismissing in-screen notice (no toast dependency in this
   // app) -- currently only used for the "vibe ON but this song isn't
@@ -75,6 +85,7 @@ export default function PlaylistScreen({route, navigation}: Props) {
       const covers = opened.getFirstVideoIds(playlistId, 4);
       if (!cancelled) {
         setDb(opened);
+        dbRef.current = opened;
         setSongs(list);
         setVibeSongs(analyzed);
         setCoverIds(covers);
@@ -87,20 +98,24 @@ export default function PlaylistScreen({route, navigation}: Props) {
     };
   }, [playlistId]);
 
-  // Cancel any in-flight batch analysis if the user navigates away, so it
-  // doesn't keep burning CPU/network for a screen nobody's looking at.
+  // Subscribe to the module-level analysis batch. Navigating away just
+  // unsubscribes -- it does NOT cancel the batch, so analysis keeps running in
+  // the background. Each update also refreshes the analyzed count/badges.
   useEffect(() => {
-    return () => {
-      analyzeHandleRef.current?.cancel();
-    };
-  }, []);
+    const unsub = subscribeAnalysisBatch(s => {
+      setBatch(s);
+      if (s.playlistId === playlistId) void refreshAnalyzed();
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playlistId]);
 
   // Re-reads songs + vibeSongs from the db -- called after any analysis
   // (lazy on-play or batch) writes a new features row, so "N analyzed",
   // the ♪? badges, and the Vibe shuffle button's enabled state all stay
   // live without a manual screen refresh.
   const refreshAnalyzed = async (targetDb?: VibesDb) => {
-    const activeDb = targetDb ?? db;
+    const activeDb = targetDb ?? dbRef.current ?? db;
     if (!activeDb) return;
     const list = playlistId === 'ALL' ? activeDb.getAllSongs() : activeDb.getPlaylistSongs(playlistId);
     const analyzed = activeDb.getVibeSongs(playlistId);
@@ -110,27 +125,26 @@ export default function PlaylistScreen({route, navigation}: Props) {
 
   const unanalyzedIds = useMemo(() => songs.filter(s => !s.hasVibe).map(s => s.videoId), [songs]);
 
-  // "Analyze playlist": batch-analyzes every not-yet-analyzed song in this
-  // playlist via analyzeMany (Task 6), so Vibe shuffle stops being gated on
-  // one song at a time getting lazily analyzed by chance of being played.
+  // This screen's batch = the global batch iff it belongs to this playlist.
+  const myBatch = batch && batch.playlistId === playlistId ? batch : null;
+  const analyzing = myBatch?.running ?? false;
+  // Some OTHER playlist is analyzing right now (only one batch runs at a time).
+  const otherBusy = (batch?.running ?? false) && batch?.playlistId !== playlistId;
+  const failedCount = myBatch && !myBatch.running ? myBatch.failed.length : 0;
+
+  // "Analyze playlist": hands the not-yet-analyzed songs to the module-level
+  // batch controller, which keeps running even if the user leaves this screen.
   const onAnalyzePlaylist = () => {
-    if (analyzeHandleRef.current || unanalyzedIds.length === 0) return;
-    const total = unanalyzedIds.length;
-    setAnalyzeProgress({done: 0, total});
-    const handle = analyzeMany(unanalyzedIds, (done, doneTotal) => {
-      setAnalyzeProgress({done, total: doneTotal});
-      void refreshAnalyzed();
-    });
-    analyzeHandleRef.current = handle;
-    handle.promise.finally(() => {
-      analyzeHandleRef.current = null;
-      setAnalyzeProgress(null);
-      void refreshAnalyzed();
-    });
+    if (analyzing || otherBusy || unanalyzedIds.length === 0) return;
+    startAnalysisBatch(unanalyzedIds, playlistId);
   };
 
   const onCancelAnalyze = () => {
-    analyzeHandleRef.current?.cancel();
+    cancelAnalysisBatch();
+  };
+
+  const onRetryFailed = () => {
+    retryFailedAnalysis(playlistId);
   };
 
   const playIndex = async (index: number) => {
@@ -272,16 +286,31 @@ export default function PlaylistScreen({route, navigation}: Props) {
                 <Chip label="Vibe mode: Off" active={!vibeMode} onPress={() => setVibeMode(false)} />
               </View>
 
-              {analyzeProgress ? (
+              {analyzing ? (
                 <View style={styles.analyzeRow}>
                   <ActivityIndicator color={colors.accent} size="small" />
                   <Text style={styles.analyzeText}>
-                    Analyzing {analyzeProgress.done}/{analyzeProgress.total}…
+                    Analyzing {myBatch!.done}/{myBatch!.total}
+                    {myBatch!.failed.length > 0 ? ` · ${myBatch!.failed.length} failed` : ''}…
                   </Text>
                   <Pressable onPress={onCancelAnalyze} hitSlop={8}>
                     <Text style={styles.cancelText}>Cancel</Text>
                   </Pressable>
                 </View>
+              ) : otherBusy ? (
+                <View style={styles.analyzeRow}>
+                  <ActivityIndicator color={colors.accent} size="small" />
+                  <Text style={styles.analyzeText}>Analyzing another playlist…</Text>
+                </View>
+              ) : failedCount > 0 ? (
+                <Pressable style={styles.analyzeRow} onPress={onRetryFailed}>
+                  <Text style={styles.analyzeButtonText}>
+                    Retry {failedCount} failed
+                    {unanalyzedIds.length > failedCount
+                      ? ` (+${unanalyzedIds.length - failedCount} more)`
+                      : ''}
+                  </Text>
+                </Pressable>
               ) : unanalyzedIds.length > 0 ? (
                 <Pressable style={styles.analyzeRow} onPress={onAnalyzePlaylist}>
                   <Text style={styles.analyzeButtonText}>

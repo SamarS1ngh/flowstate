@@ -268,3 +268,109 @@ export function analyzeMany(
     },
   };
 }
+
+// --- module-level batch controller ------------------------------------
+// The batch used to live in PlaylistScreen's state, so navigating away (or
+// backgrounding) unmounted the screen and CANCELLED analysis -- you had to
+// sit and watch a progress bar. This moves the running batch to module scope
+// so it survives navigation and any screen can subscribe to / start / cancel
+// it. (App-kill survival is a separate step: a native foreground service.)
+//
+// It also tracks OK vs FAILED per song instead of counting every attempt as
+// "done" -- so the UI can honestly show "N analyzed, M failed" and offer a
+// retry, rather than a failure looking like progress (which hid the analysis
+// bug for a whole session).
+
+export interface BatchState {
+  running: boolean;
+  /** Playlist this batch belongs to (for the UI to know which screen owns it). */
+  playlistId: string | null;
+  total: number;
+  /** Attempts completed (ok + failed). */
+  done: number;
+  /** Songs a features row exists for after the attempt. */
+  ok: number;
+  /** videoIds whose analysis attempt failed (network/decode/etc). */
+  failed: string[];
+}
+
+const IDLE: BatchState = {
+  running: false,
+  playlistId: null,
+  total: 0,
+  done: 0,
+  ok: 0,
+  failed: [],
+};
+
+let batchState: BatchState = IDLE;
+let batchCancelled = false;
+const batchListeners = new Set<(s: BatchState) => void>();
+
+function emitBatch() {
+  const snapshot = {...batchState, failed: [...batchState.failed]};
+  for (const l of batchListeners) l(snapshot);
+}
+
+/** Current batch state (snapshot). */
+export function getAnalysisBatch(): BatchState {
+  return {...batchState, failed: [...batchState.failed]};
+}
+
+/** Subscribe to batch-state changes; returns an unsubscribe fn. */
+export function subscribeAnalysisBatch(cb: (s: BatchState) => void): () => void {
+  batchListeners.add(cb);
+  cb(getAnalysisBatch());
+  return () => {
+    batchListeners.delete(cb);
+  };
+}
+
+/** Cancel the running batch (stops before the next not-yet-attempted song). */
+export function cancelAnalysisBatch(): void {
+  batchCancelled = true;
+}
+
+/**
+ * Start analyzing `videoIds` as the module-level batch. No-op if a batch is
+ * already running. Survives screen navigation (it's module state, not screen
+ * state). Skips already-analyzed songs via analyzeSong's own check, so it's
+ * naturally resumable. Notifies subscribers after every song.
+ */
+export function startAnalysisBatch(videoIds: string[], playlistId: string | null): void {
+  if (batchState.running) return;
+  batchCancelled = false;
+  batchState = {
+    running: true,
+    playlistId,
+    total: videoIds.length,
+    done: 0,
+    ok: 0,
+    failed: [],
+  };
+  emitBatch();
+
+  void (async () => {
+    for (const videoId of videoIds) {
+      if (batchCancelled) break;
+      const ok = await analyzeSong(videoId);
+      batchState = {
+        ...batchState,
+        done: batchState.done + 1,
+        ok: batchState.ok + (ok ? 1 : 0),
+        failed: ok ? batchState.failed : [...batchState.failed, videoId],
+      };
+      emitBatch();
+    }
+    batchState = {...batchState, running: false};
+    emitBatch();
+  })();
+}
+
+/** Re-run just the failed songs from the last batch (the "retry" action). */
+export function retryFailedAnalysis(playlistId: string | null): void {
+  if (batchState.running) return;
+  const toRetry = batchState.failed;
+  if (toRetry.length === 0) return;
+  startAnalysisBatch(toRetry, playlistId);
+}
