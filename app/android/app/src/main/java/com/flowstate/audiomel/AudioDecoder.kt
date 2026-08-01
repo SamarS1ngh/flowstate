@@ -236,6 +236,13 @@ object AudioDecoder {
      * normalized cutoff (only < 1 when downsampling, which is our case), and the
      * weights are normalized so DC gain is exactly 1.
      */
+    // Kernel lookup-table resolution: samples per unit of `t`. The combined
+    // kernel g(t) = sinc_lp(t) * kaiser(t) is smooth, so 1024 steps/unit with
+    // linear interpolation is indistinguishable from computing it directly
+    // (verified: cosine unchanged vs the direct version), while turning each
+    // tap from a sin() + Bessel-I0 series into one table lookup + lerp.
+    private const val KERNEL_OVERSAMPLE = 1024
+
     private fun sincResample(input: FloatArray, srcRate: Int, dstRate: Int): FloatArray {
         if (srcRate == dstRate || input.isEmpty()) return input
         val step = srcRate.toDouble() / dstRate.toDouble() // input samples per output sample
@@ -245,7 +252,19 @@ object AudioDecoder {
         // leave a transition band (the last ~10% would otherwise alias).
         val fc = (if (dstRate < srcRate) dstRate.toDouble() / srcRate.toDouble() else 1.0) * CUTOFF_FRAC
         val n = input.size
+
+        // Precompute the combined kernel g(|t|) once (it's even in t). This
+        // moves the expensive sin() + Bessel-I0 out of the per-sample hot loop
+        // (~128 taps * millions of samples) into a one-time ~65k-entry table.
         val i0Beta = besselI0(KAISER_BETA)
+        val tableLen = SINC_HALF * KERNEL_OVERSAMPLE + 1
+        val kernel = DoubleArray(tableLen)
+        for (j in 0 until tableLen) {
+            val t = j.toDouble() / KERNEL_OVERSAMPLE
+            kernel[j] = sincLowpass(t, fc) * kaiser(t, SINC_HALF, i0Beta)
+        }
+        val maxIdx = tableLen - 1
+
         for (i in 0 until outLen) {
             val center = i * step
             val i0 = Math.floor(center).toInt()
@@ -255,8 +274,16 @@ object AudioDecoder {
             val kEnd = i0 + SINC_HALF
             while (k <= kEnd) {
                 if (k in 0 until n) {
-                    val t = center - k
-                    val w = sincLowpass(t, fc) * kaiser(t, SINC_HALF, i0Beta)
+                    // g(|t|) via linear interpolation in the kernel table.
+                    val pos = Math.abs(center - k) * KERNEL_OVERSAMPLE
+                    val idx = pos.toInt()
+                    val w: Double
+                    if (idx >= maxIdx) {
+                        w = 0.0
+                    } else {
+                        val frac = pos - idx
+                        w = kernel[idx] + (kernel[idx + 1] - kernel[idx]) * frac
+                    }
                     acc += input[k] * w
                     norm += w
                 }
