@@ -5,3 +5,17 @@
 require('react-native-gesture-handler/jestSetup');
 
 jest.mock('react-native-reanimated', () => require('react-native-reanimated/mock'));
+
+// react-native-background-actions pulls in native modules that don't exist
+// under Jest; analyzer.ts loads it defensively (try/require) but the require
+// itself can throw at import time, so stub it to a no-op foreground service.
+jest.mock('react-native-background-actions', () => ({
+  default: {
+    start: jest.fn(async (task) => {
+      await task();
+    }),
+    stop: jest.fn(async () => {}),
+    updateNotification: jest.fn(async () => {}),
+    isRunning: jest.fn(() => false),
+  },
+}));

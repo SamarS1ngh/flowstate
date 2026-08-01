@@ -1,7 +1,14 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Foreground service for on-device analysis (react-native-background-actions),
+         so a batch keeps running when the app is backgrounded / screen off.
+         Android 14+ requires a foregroundServiceType + matching permission;
+         analysis downloads+processes audio, so "dataSync" is the fit. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
       android:name=".MainApplication"
@@ -25,5 +32,13 @@
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
       </activity>
+      <!-- Add the required foregroundServiceType onto the service that
+           react-native-background-actions declares (its own manifest omits it,
+           which crashes on Android 14+). tools:node="merge" augments that
+           service entry rather than redeclaring it. -->
+      <service
+        android:name="com.asterinet.react.bgactions.RNBackgroundActionsTask"
+        android:foregroundServiceType="dataSync"
+        tools:node="merge" />
     </application>
 </manifest>

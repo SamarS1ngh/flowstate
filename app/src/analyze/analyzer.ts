@@ -21,6 +21,24 @@ import {decodeAndMel} from './audio';
 import {analyzeEmbeddingAndMoods} from './tflite';
 import {ensureBaseSchema} from '../db/vibesDb';
 
+// Android foreground-service wrapper (keeps the analysis loop alive while the
+// app is backgrounded / screen off). Loaded defensively -- null under jest or
+// if the native module is missing, in which case the batch runs bare (still
+// fine while the app is foregrounded). Minimal surface we use, typed loosely.
+interface BatchServiceLike {
+  start(task: () => Promise<void>, options: unknown): Promise<void>;
+  stop(): Promise<void>;
+  updateNotification(opts: {taskDesc: string}): Promise<void>;
+  isRunning(): boolean;
+}
+let batchService: BatchServiceLike | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  batchService = require('react-native-background-actions').default as BatchServiceLike;
+} catch {
+  batchService = null;
+}
+
 // Stamped into the `meta` table (key 'model_version') after every successful
 // analysis, so a future model swap has a marker for "which rows were
 // produced by the old model and may need re-analysis." Matches the bundled
@@ -350,21 +368,71 @@ export function startAnalysisBatch(videoIds: string[], playlistId: string | null
   };
   emitBatch();
 
-  void (async () => {
-    for (const videoId of videoIds) {
-      if (batchCancelled) break;
-      const ok = await analyzeSong(videoId);
-      batchState = {
-        ...batchState,
-        done: batchState.done + 1,
-        ok: batchState.ok + (ok ? 1 : 0),
-        failed: ok ? batchState.failed : [...batchState.failed, videoId],
-      };
-      emitBatch();
-    }
-    batchState = {...batchState, running: false};
+  // Run the loop inside an Android foreground service (via
+  // react-native-background-actions) so it keeps going when the app is
+  // backgrounded or the screen is locked -- not just when the user switches
+  // screens (that's already handled by this being module-level state). The
+  // service shows a persistent "Analyzing N/M" notification and is torn down
+  // when the batch finishes or is cancelled. If the native module is
+  // unavailable (e.g. jest), the loop still runs, just without the service.
+  void runBatchWithForegroundService(videoIds);
+}
+
+async function batchLoop(videoIds: string[]): Promise<void> {
+  for (const videoId of videoIds) {
+    if (batchCancelled) break;
+    const ok = await analyzeSong(videoId);
+    batchState = {
+      ...batchState,
+      done: batchState.done + 1,
+      ok: batchState.ok + (ok ? 1 : 0),
+      failed: ok ? batchState.failed : [...batchState.failed, videoId],
+    };
     emitBatch();
-  })();
+    if (batchService?.isRunning()) {
+      const {done, total, failed} = batchState;
+      await batchService
+        .updateNotification({
+          taskDesc: `${done}/${total}${failed.length ? ` · ${failed.length} failed` : ''}`,
+        })
+        .catch(() => {});
+    }
+  }
+  batchState = {...batchState, running: false};
+  emitBatch();
+}
+
+async function runBatchWithForegroundService(videoIds: string[]): Promise<void> {
+  if (!batchService) {
+    // No foreground-service module (tests / unsupported) -- run bare.
+    await batchLoop(videoIds);
+    return;
+  }
+  const options = {
+    taskName: 'flowstateAnalysis',
+    taskTitle: 'Analyzing your music',
+    taskDesc: `0/${videoIds.length}`,
+    taskIcon: {name: 'ic_launcher', type: 'mipmap'},
+    color: '#5b8def',
+    linkingURI: 'flowstate://library',
+    // REQUIRED on Android 14+ (targetSDK 34+): the service must start with a
+    // declared foregroundServiceType or the OS kills the process
+    // (InvalidForegroundServiceTypeException "type none"). Analysis downloads +
+    // processes audio -> dataSync. Must also be declared in AndroidManifest on
+    // the RNBackgroundActionsTask service + hold FOREGROUND_SERVICE_DATA_SYNC.
+    foregroundServiceType: ['dataSync'],
+  };
+  try {
+    // BackgroundService.start runs the task (our loop) inside the FGS and
+    // resolves when the task returns; stop() removes the notification.
+    await batchService.start(() => batchLoop(videoIds), options);
+  } catch {
+    // Starting the service failed (e.g. OS restriction) -- fall back to a
+    // bare loop so analysis still proceeds while the app is foregrounded.
+    if (batchState.running && batchState.done === 0) await batchLoop(videoIds);
+  } finally {
+    await batchService.stop().catch(() => {});
+  }
 }
 
 /** Re-run just the failed songs from the last batch (the "retry" action). */
