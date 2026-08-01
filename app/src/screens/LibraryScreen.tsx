@@ -6,6 +6,7 @@ import {
   RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   View,
   ActivityIndicator,
 } from 'react-native';
@@ -23,7 +24,8 @@ import type {Playlist, Song} from '../types';
 import Chip from '../ui/Chip';
 import IconButton from '../ui/IconButton';
 import ListRow from '../ui/ListRow';
-import {colors, spacing, type} from '../ui/theme';
+import {filterSongs, filterPlaylists} from '../library/search';
+import {colors, radii, spacing, type} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Library'>;
 
@@ -52,6 +54,7 @@ export default function LibraryScreen({navigation}: Props) {
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>('playlists');
+  const [search, setSearch] = useState('');
   const [startingId, setStartingId] = useState<string | null>(null);
   // Prevents auto-sync from firing again every time this screen regains
   // focus in the same app session (e.g. navigating Library -> Player ->
@@ -171,15 +174,22 @@ export default function LibraryScreen({navigation}: Props) {
     }, []),
   );
 
-  // Tapping a row in the "Songs" filter plays that song immediately from the
-  // whole library, mirroring PlaylistScreen's plain (non-vibe) tap behavior
+  // Search filters the in-memory library instantly (no DB round-trip). The
+  // active tab shows its filtered subset; an empty query is a no-op that
+  // returns the original list reference (see library/search.ts).
+  const visibleSongs = useMemo(() => filterSongs(allSongs, search), [allSongs, search]);
+  const visiblePlaylists = useMemo(() => filterPlaylists(playlists, search), [playlists, search]);
+
+  // Tapping a row in the "Songs" list plays that song immediately, queuing
+  // from the CURRENTLY VISIBLE (possibly search-filtered) list so the queue
+  // matches what the user sees. Mirrors PlaylistScreen's plain (non-vibe) tap
   // -- reuses the same exported playFrom/SimpleQueue, no new playback logic.
   const onPressSong = useCallback(
     async (index: number) => {
-      const song = allSongs[index];
+      const song = visibleSongs[index];
       setStartingId(song.videoId);
       try {
-        await playFrom(new SimpleQueue(allSongs, index), song);
+        await playFrom(new SimpleQueue(visibleSongs, index), song);
         navigation.navigate('Player');
       } catch (e) {
         Alert.alert('Could not play song', e instanceof Error ? e.message : 'Unknown error');
@@ -187,7 +197,7 @@ export default function LibraryScreen({navigation}: Props) {
         setStartingId(null);
       }
     },
-    [allSongs, navigation],
+    [visibleSongs, navigation],
   );
 
   if (loading) {
@@ -254,6 +264,25 @@ export default function LibraryScreen({navigation}: Props) {
         <Chip label="Playlists" active={filter === 'playlists'} onPress={() => setFilter('playlists')} />
         <Chip label="Songs" active={filter === 'songs'} onPress={() => setFilter('songs')} />
       </View>
+      <View style={styles.searchRow}>
+        <Text style={styles.searchIcon}>⌕</Text>
+        <TextInput
+          style={styles.searchInput}
+          value={search}
+          onChangeText={setSearch}
+          placeholder={filter === 'songs' ? 'Search songs or artists' : 'Search playlists'}
+          placeholderTextColor={colors.textTertiary}
+          autoCorrect={false}
+          autoCapitalize="none"
+          returnKeyType="search"
+          clearButtonMode="while-editing"
+        />
+        {search.length > 0 ? (
+          <Pressable onPress={() => setSearch('')} hitSlop={12}>
+            <Text style={styles.searchClear}>✕</Text>
+          </Pressable>
+        ) : null}
+      </View>
       {syncStatus && !syncing ? (
         <View style={styles.statusBanner}>
           <Text style={styles.statusBannerText}>{syncStatus}</Text>
@@ -262,20 +291,27 @@ export default function LibraryScreen({navigation}: Props) {
       {filter === 'playlists' ? (
         <PlaylistList
           navigation={navigation}
-          playlists={playlists}
+          playlists={visiblePlaylists}
           allCount={allSongs.length}
           coverIds={coverIds}
           loggedIn={loggedIn}
           syncing={syncing}
           onRefresh={runSync}
+          hideAllRow={search.trim().length > 0}
         />
       ) : (
         <FlatList
           style={styles.list}
           contentContainerStyle={styles.listContent}
-          data={allSongs}
+          data={visibleSongs}
           keyExtractor={item => item.videoId}
           initialNumToRender={16}
+          keyboardShouldPersistTaps="handled"
+          ListEmptyComponent={
+            search.trim().length > 0 ? (
+              <Text style={styles.emptySearch}>No songs match “{search.trim()}”</Text>
+            ) : null
+          }
           renderItem={({item, index}) => (
             <ListRow
               videoId={item.videoId}
@@ -329,6 +365,7 @@ function PlaylistList({
   loggedIn,
   syncing,
   onRefresh,
+  hideAllRow = false,
 }: {
   navigation: Props['navigation'];
   playlists: Playlist[];
@@ -337,6 +374,9 @@ function PlaylistList({
   loggedIn: boolean;
   syncing: boolean;
   onRefresh: () => void;
+  // When searching playlists, the pinned "All songs" pseudo-row isn't a
+  // playlist match and would be noise -- hide it so only real name matches show.
+  hideAllRow?: boolean;
 }) {
   // "All songs" is a pinned pseudo-playlist (not a real row in `playlists`)
   // -- always first, like the reference app's pinned "Liked music". If a
@@ -357,7 +397,7 @@ function PlaylistList({
     | {kind: 'playlist'; playlist: Playlist};
 
   const rows: Row[] = [
-    {kind: 'all'},
+    ...(hideAllRow ? [] : [{kind: 'all' as const}]),
     ...(pinned ? [{kind: 'liked' as const, playlist: pinned}] : []),
     ...rest.map(p => ({kind: 'playlist' as const, playlist: p})),
   ];
@@ -423,6 +463,26 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.xs,
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.md,
+    height: 40,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radii.md,
+  },
+  searchIcon: {color: colors.textTertiary, fontSize: 18, marginRight: spacing.sm},
+  searchInput: {flex: 1, color: colors.textPrimary, fontSize: 15, padding: 0},
+  searchClear: {color: colors.textTertiary, fontSize: 15, paddingLeft: spacing.sm},
+  emptySearch: {
+    color: colors.textSecondary,
+    fontSize: 15,
+    textAlign: 'center',
+    paddingVertical: spacing.xxl,
+    paddingHorizontal: spacing.lg,
   },
   list: {flex: 1, backgroundColor: colors.bg},
   listContent: {paddingVertical: spacing.sm, paddingBottom: spacing.xxxl},
