@@ -34,12 +34,28 @@ interface BatchServiceLike {
   updateNotification(opts: {taskDesc: string}): Promise<void>;
   isRunning(): boolean;
 }
+// DISABLED: react-native-background-actions' startForeground() reliably races
+// Android 14/15's "call startForeground() within 5s of startForegroundService()"
+// rule when the analysis loop's heavy work congests the bridge right as the
+// service starts -> ForegroundServiceDidNotStartInTimeException crashes the
+// whole app (intermittently on launch, and on resume). A 1.2s yield lowered
+// the odds but did NOT eliminate the crash. An intermittently-crashing app is
+// worse than losing fully-backgrounded analysis, so the batch now runs as a
+// bare loop: analysis auto-starts, survives in-app navigation (module-level
+// state), and respects the Wi-Fi guard, but pauses when the app is fully
+// backgrounded/closed and resumes on return. Proper always-on background
+// analysis needs a hand-rolled native foreground service (calls
+// startForeground() synchronously in onStartCommand, no JS-timing race) --
+// tracked as a follow-up. Flip to true only once that native service exists.
+const USE_FOREGROUND_SERVICE = false;
 let batchService: BatchServiceLike | null = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  batchService = require('react-native-background-actions').default as BatchServiceLike;
-} catch {
-  batchService = null;
+if (USE_FOREGROUND_SERVICE) {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    batchService = require('react-native-background-actions').default as BatchServiceLike;
+  } catch {
+    batchService = null;
+  }
 }
 
 // Stamped into the `meta` table (key 'model_version') after every successful
