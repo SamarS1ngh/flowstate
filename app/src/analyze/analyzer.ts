@@ -15,6 +15,7 @@
 // on-play, batch playlist analysis) far more often than it runs from a
 // button a user is staring at, so silent-log-and-continue is the right
 // default.
+import {AppState} from 'react-native';
 import * as RNFS from '@dr.pogodin/react-native-fs';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {resolveStreamUrl} from '../stream/resolver';
@@ -506,5 +507,16 @@ export async function autoStartAnalysis(unanalyzedVideoIds: string[]): Promise<v
     return;
   }
   autoStartedThisSession = true;
-  startAnalysisBatch(unanalyzedVideoIds, null);
+  // DEFER the foreground-service start. Starting it during app cold-start
+  // races Android's "startForegroundService() must call startForeground()
+  // within 5s" rule -- on a congested cold-start the service dispatch can
+  // miss that window and the OS crashes the process
+  // (ForegroundServiceDidNotStartInTimeException), which made the app fail to
+  // open ~2 of 3 launches. Wait for the app to settle AND be actually
+  // foregrounded (starting an FGS from background is itself disallowed).
+  setTimeout(() => {
+    if (batchState.running) return;
+    if (AppState.currentState !== 'active') return;
+    startAnalysisBatch(unanalyzedVideoIds, null);
+  }, 4000);
 }
