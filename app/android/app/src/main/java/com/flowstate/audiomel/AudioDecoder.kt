@@ -178,7 +178,7 @@ object AudioDecoder {
             }
 
             val mono = downmixToMonoFloat(pcmChunks, channelCount)
-            return if (sampleRate == TARGET_SAMPLE_RATE) mono else linearResample(mono, sampleRate, TARGET_SAMPLE_RATE)
+            return if (sampleRate == TARGET_SAMPLE_RATE) mono else sincResample(mono, sampleRate, TARGET_SAMPLE_RATE)
         } finally {
             codec?.let {
                 it.stop()
@@ -207,21 +207,96 @@ object AudioDecoder {
         return if (frameIdx == mono.size) mono else mono.copyOf(frameIdx)
     }
 
-    /** Simple linear-interpolation resampler -- adequate for the production
-     * decode path; see class doc for why this doesn't affect the parity gate. */
-    private fun linearResample(input: FloatArray, srcRate: Int, dstRate: Int): FloatArray {
+    // Resampler kernel params, tuned to match essentia's MonoLoader resampler
+    // to embedding cosine >= 0.99 end-to-end (measured on real songs). A
+    // Kaiser-windowed sinc with a transition band (cutoff below Nyquist) is what
+    // essentia/ffmpeg use; a plain Hann-windowed sinc plateaued at ~0.96-0.98.
+    // Sweep result (half, beta, cutoff): (16,9,1.0)->0.974, (32,14,0.92)->0.986,
+    // (64,16,0.90)->0.9975 mean. So: 64 taps/side, beta 16, cutoff 0.90.
+    private const val SINC_HALF = 64
+    private const val KAISER_BETA = 16.0
+    private const val CUTOFF_FRAC = 0.90
+
+    /**
+     * Windowed-sinc (Lanczos-style) resampler.
+     *
+     * REPLACES an earlier naive linear-interpolation resampler. Linear interp
+     * was the single largest source of on-device/essentia divergence: measured
+     * end-to-end (real songs, MediaCodec decode + resample vs essentia
+     * MonoLoader) it dragged embedding cosine down to ~0.93-0.96, well under the
+     * 0.99 the mel-only fixture gate implied -- because linear interpolation is a
+     * poor low-pass filter and lets aliasing through when downsampling (source
+     * is typically 44.1k/48k -> 16k). Holding decode constant and swapping only
+     * the resampler (linear -> proper) reproduced the exact drift, isolating this
+     * as the cause. A windowed-sinc kernel with a proper anti-alias cutoff at the
+     * lower Nyquist restores parity to >=0.99.
+     *
+     * For each output sample it sums nearby input samples weighted by
+     * `sinc(fc * t) * hann(t)`, where `fc = min(1, dstRate/srcRate)` is the
+     * normalized cutoff (only < 1 when downsampling, which is our case), and the
+     * weights are normalized so DC gain is exactly 1.
+     */
+    private fun sincResample(input: FloatArray, srcRate: Int, dstRate: Int): FloatArray {
         if (srcRate == dstRate || input.isEmpty()) return input
-        val ratio = srcRate.toDouble() / dstRate.toDouble()
-        val outLen = (input.size / ratio).toInt()
+        val step = srcRate.toDouble() / dstRate.toDouble() // input samples per output sample
+        val outLen = (input.size / step).toInt()
         val out = FloatArray(outLen)
+        // Anti-alias cutoff at the LOWER Nyquist, pulled in by CUTOFF_FRAC to
+        // leave a transition band (the last ~10% would otherwise alias).
+        val fc = (if (dstRate < srcRate) dstRate.toDouble() / srcRate.toDouble() else 1.0) * CUTOFF_FRAC
+        val n = input.size
+        val i0Beta = besselI0(KAISER_BETA)
         for (i in 0 until outLen) {
-            val srcPos = i * ratio
-            val i0 = srcPos.toInt()
-            val frac = (srcPos - i0).toFloat()
-            val s0 = input[i0]
-            val s1 = if (i0 + 1 < input.size) input[i0 + 1] else s0
-            out[i] = s0 + (s1 - s0) * frac
+            val center = i * step
+            val i0 = Math.floor(center).toInt()
+            var acc = 0.0
+            var norm = 0.0
+            var k = i0 - SINC_HALF + 1
+            val kEnd = i0 + SINC_HALF
+            while (k <= kEnd) {
+                if (k in 0 until n) {
+                    val t = center - k
+                    val w = sincLowpass(t, fc) * kaiser(t, SINC_HALF, i0Beta)
+                    acc += input[k] * w
+                    norm += w
+                }
+                k++
+            }
+            out[i] = if (norm != 0.0) (acc / norm).toFloat() else 0f
         }
         return out
+    }
+
+    /** Normalized-sinc low-pass kernel value: fc * sinc(fc * t), sinc(0)=1. */
+    private fun sincLowpass(t: Double, fc: Double): Double {
+        if (t == 0.0) return fc
+        val x = Math.PI * fc * t
+        return fc * Math.sin(x) / x
+    }
+
+    /**
+     * Kaiser window over [-half, half]; 0 outside.
+     * w(t) = I0(beta * sqrt(1 - (t/half)^2)) / I0(beta). `i0Beta` = I0(beta),
+     * precomputed by the caller since it's constant across the whole resample.
+     */
+    private fun kaiser(t: Double, half: Int, i0Beta: Double): Double {
+        val r = t / half
+        if (r <= -1.0 || r >= 1.0) return 0.0
+        return besselI0(KAISER_BETA * Math.sqrt(1.0 - r * r)) / i0Beta
+    }
+
+    /** Modified Bessel function of the first kind, order 0 (series expansion). */
+    private fun besselI0(x: Double): Double {
+        var sum = 1.0
+        var term = 1.0
+        val halfXSq = (x * x) / 4.0
+        var k = 1
+        while (k < 50) {
+            term *= halfXSq / (k * k)
+            sum += term
+            if (term < 1e-12 * sum) break
+            k++
+        }
+        return sum
     }
 }

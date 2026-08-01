@@ -18,7 +18,12 @@ import {importVibesDb} from '../db/vibesDb';
 import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
 import {colors, radii, spacing, type} from '../ui/theme';
 import {analyzeEmbeddingAndMoods} from '../analyze/tflite';
-import {runMelFixtureParity, runRealSongDecodeSanity} from '../analyze/melParityHarness';
+import {
+  runMelFixtureParity,
+  runRealSongDecodeSanity,
+  runRealSongPathParityProbe,
+  type RealSongPathParityEntry,
+} from '../analyze/melParityHarness';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
@@ -31,6 +36,7 @@ export default function SettingsScreen({navigation}: Props) {
   const [tfliteProbing, setTfliteProbing] = useState(false);
   const [melParityRunning, setMelParityRunning] = useState(false);
   const [realSongProbing, setRealSongProbing] = useState(false);
+  const [realSongPathParityRunning, setRealSongPathParityRunning] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -228,6 +234,40 @@ export default function SettingsScreen({navigation}: Props) {
     }
   };
 
+  // TEMP (real-song end-to-end parity measurement -- see
+  // .superpowers/sdd/real-song-parity-report.md): files pre-pushed via
+  // `adb push <file> ${realSongProbeDir()}/<fileName>` (app's own external
+  // files dir, no run-as needed). Filled in per measurement run; left empty
+  // otherwise so the button below is a no-op with nothing pushed.
+  // Fill in {videoId, fileName} for files pre-pushed to realSongProbeDir()
+  // (adb push <file> /sdcard/Android/data/com.flowstate/files/flowstate_probe/)
+  // then compare results.json against essentia refs from
+  // analyzer/parity_ref.py. Left empty in source; populated ad hoc when
+  // running the real-song end-to-end parity check. See
+  // .superpowers/sdd/real-song-parity-report.md.
+  const REAL_SONG_PATH_PARITY_ENTRIES: RealSongPathParityEntry[] = [];
+
+  const onRunRealSongPathParity = async () => {
+    setRealSongPathParityRunning(true);
+    try {
+      const results = await runRealSongPathParityProbe(REAL_SONG_PATH_PARITY_ENTRIES, (videoId, i, total) => {
+        console.log(`[real song path parity] (${i + 1}/${total}) running ${videoId}...`);
+      });
+      for (const r of results) {
+        console.log(`[real song path parity] ${r.videoId}: ${r.numPatches} patches, embedding logged`);
+      }
+      Alert.alert(
+        'Real-song path parity done',
+        `${results.length}/${REAL_SONG_PATH_PARITY_ENTRIES.length} songs processed.\nResults written to realSongProbeDir()/results.json`,
+      );
+    } catch (e) {
+      console.log('[real song path parity] FAILED', e);
+      Alert.alert('Real-song path parity failed', e instanceof Error ? e.message : String(e));
+    } finally {
+      setRealSongPathParityRunning(false);
+    }
+  };
+
   return (
     <ScrollView
       style={styles.container}
@@ -376,6 +416,27 @@ export default function SettingsScreen({navigation}: Props) {
               <ActivityIndicator color={colors.textPrimary} />
             ) : (
               <Text style={styles.buttonSecondaryText}>Run real-song decode sanity</Text>
+            )}
+          </Pressable>
+        </View>
+      )}
+      {__DEV__ && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Real-song path parity (dev only, TEMP)</Text>
+          <Text style={styles.sectionBody}>
+            Runs the full production decode path on real audio files pre-pushed to
+            realSongProbeDir(), writing pooled embeddings to results.json for comparison
+            against an essentia reference computed on the identical file. Not shown in
+            release builds.
+          </Text>
+          <Pressable
+            style={[styles.button, styles.buttonSecondary, realSongPathParityRunning && styles.buttonDisabled]}
+            disabled={realSongPathParityRunning}
+            onPress={onRunRealSongPathParity}>
+            {realSongPathParityRunning ? (
+              <ActivityIndicator color={colors.textPrimary} />
+            ) : (
+              <Text style={styles.buttonSecondaryText}>Run real-song path parity</Text>
             )}
           </Pressable>
         </View>

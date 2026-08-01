@@ -1,5 +1,5 @@
 import * as RNFS from '@dr.pogodin/react-native-fs';
-import {base64ToFloat32Array, computeMelFromPcm, decodeAndMel} from './audio';
+import {base64ToFloat32Array, computeMelFromPcm, decodeAndMel, float32ArrayToBase64} from './audio';
 import {analyzeEmbeddingAndMoods, loadModels, runEmbedding} from './tflite';
 import {resolveStreamUrl} from '../stream/resolver';
 import {openVibesDb} from '../db/vibesDb';
@@ -153,4 +153,72 @@ export async function runRealSongDecodeSanity(): Promise<RealSongSanityResult> {
   } finally {
     await RNFS.unlink(destPath).catch(() => {});
   }
+}
+
+// Real-song END-TO-END parity (closes the gap the fixture-based
+// runMelFixtureParity above deliberately leaves open): that harness injects
+// already-16kHz-mono PCM directly, bypassing decodeToPcm's MediaCodec
+// decode + LINEAR resample front-end (AudioDecoder.kt) entirely, so it can
+// prove [mel -> model] parity but never [decode -> resample] parity. This
+// runs the FULL production path (decodeAndMel == decodeToPcm's decoder +
+// resampler + middle-120s-slice, then computeMel -> TFLite embedding) on
+// real downloaded audio files pushed to the device beforehand (adb push to
+// `realSongProbeDir()`, i.e. the app's own external files dir -- no root/
+// run-as needed even for a non-debuggable release build), so it can be
+// compared against essentia's OWN decode+resample (MonoLoader) on the
+// IDENTICAL file (analyzer/scripts/real_song_reference.py, run in the
+// flowstate-analyzer Docker image) via cosine similarity. See
+// .superpowers/sdd/real-song-parity-report.md for the measured numbers.
+
+const REAL_SONG_PROBE_DIR_NAME = 'flowstate_probe';
+
+/** App's own external-files-dir subfolder pushed audio files + results live in. */
+export function realSongProbeDir(): string {
+  return `${RNFS.ExternalDirectoryPath}/${REAL_SONG_PROBE_DIR_NAME}`;
+}
+
+export interface RealSongPathParityEntry {
+  videoId: string;
+  /** File name (already pushed) under realSongProbeDir(). */
+  fileName: string;
+}
+
+export interface RealSongPathParityResult {
+  videoId: string;
+  numPatches: number;
+  /** Base64 little-endian float32[200] -- the on-device pooled embedding. */
+  embeddingB64: string;
+}
+
+/**
+ * Runs the real production decode+mel+embedding path on each pushed local
+ * file and writes cumulative results (as JSON) to
+ * `${realSongProbeDir()}/results.json` after each song, so partial progress
+ * survives even if a later file throws. Returns the same array.
+ */
+export async function runRealSongPathParityProbe(
+  entries: RealSongPathParityEntry[],
+  onProgress?: (videoId: string, i: number, total: number) => void,
+): Promise<RealSongPathParityResult[]> {
+  await loadModels();
+  const results: RealSongPathParityResult[] = [];
+  const resultsPath = `${realSongProbeDir()}/results.json`;
+  for (let i = 0; i < entries.length; i++) {
+    const {videoId, fileName} = entries[i];
+    onProgress?.(videoId, i, entries.length);
+
+    const path = `${realSongProbeDir()}/${fileName}`;
+    const patches = await decodeAndMel(path);
+    if (patches.length === 0) {
+      throw new Error(`${videoId}: decoded audio produced 0 mel patches`);
+    }
+    const {embedding} = await analyzeEmbeddingAndMoods(patches);
+    results.push({
+      videoId,
+      numPatches: patches.length,
+      embeddingB64: float32ArrayToBase64(embedding),
+    });
+    await RNFS.writeFile(resultsPath, JSON.stringify(results), 'utf8');
+  }
+  return results;
 }
