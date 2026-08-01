@@ -9,7 +9,7 @@ import com.facebook.react.uimanager.ViewManager
  * for why this works unmodified under RN 0.86's New Arch interop layer). */
 class AudioMelPackage : ReactPackage {
     override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> =
-        listOf(AudioMelModule(reactContext))
+        listOf(AudioMelModule(reactContext), AnalysisServiceModule(reactContext))
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =
         emptyList()

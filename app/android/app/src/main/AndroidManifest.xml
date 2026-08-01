@@ -32,10 +32,17 @@
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
       </activity>
-      <!-- Add the required foregroundServiceType onto the service that
-           react-native-background-actions declares (its own manifest omits it,
-           which crashes on Android 14+). tools:node="merge" augments that
-           service entry rather than redeclaring it. -->
+      <!-- Our own reliable analysis foreground service (replaces
+           react-native-background-actions, whose JS-driven startForeground
+           raced Android 14/15's 5s window and crashed the app). Calls
+           startForeground() synchronously in onStartCommand. -->
+      <service
+        android:name=".AnalysisForegroundService"
+        android:exported="false"
+        android:foregroundServiceType="dataSync" />
+      <!-- The (now-unused) background-actions service still gets merged from
+           its own manifest; give it a type too so it can never crash if some
+           transitive path starts it. -->
       <service
         android:name="com.asterinet.react.bgactions.RNBackgroundActionsTask"
         android:foregroundServiceType="dataSync"

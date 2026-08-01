@@ -15,7 +15,7 @@
 // on-play, batch playlist analysis) far more often than it runs from a
 // button a user is staring at, so silent-log-and-continue is the right
 // default.
-import {AppState} from 'react-native';
+import {AppState, NativeModules} from 'react-native';
 import NetInfo from '@react-native-community/netinfo';
 import * as RNFS from '@dr.pogodin/react-native-fs';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -24,38 +24,26 @@ import {decodeAndMel} from './audio';
 import {analyzeEmbeddingAndMoods} from './tflite';
 import {ensureBaseSchema} from '../db/vibesDb';
 
-// Android foreground-service wrapper (keeps the analysis loop alive while the
-// app is backgrounded / screen off). Loaded defensively -- null under jest or
-// if the native module is missing, in which case the batch runs bare (still
-// fine while the app is foregrounded). Minimal surface we use, typed loosely.
-interface BatchServiceLike {
-  start(task: () => Promise<void>, options: unknown): Promise<void>;
-  stop(): Promise<void>;
-  updateNotification(opts: {taskDesc: string}): Promise<void>;
-  isRunning(): boolean;
+// Our own native foreground service (AnalysisForegroundService.kt), exposed as
+// NativeModules.AnalysisService. Keeps the process foregrounded so Android
+// doesn't suspend/kill it while the app is backgrounded -- the analysis loop
+// keeps running in JS. This REPLACES react-native-background-actions, whose
+// JS-driven startForeground() raced Android 14/15's 5s window and crashed the
+// app intermittently; our service calls startForeground() synchronously in
+// native onStartCommand, so there's no JS-timing race. Null under jest / if
+// the module is missing -> the batch runs bare (fine while foregrounded).
+interface AnalysisServiceLike {
+  start(title: string, text: string): void;
+  update(title: string, text: string): void;
+  stop(): void;
 }
-// DISABLED: react-native-background-actions' startForeground() reliably races
-// Android 14/15's "call startForeground() within 5s of startForegroundService()"
-// rule when the analysis loop's heavy work congests the bridge right as the
-// service starts -> ForegroundServiceDidNotStartInTimeException crashes the
-// whole app (intermittently on launch, and on resume). A 1.2s yield lowered
-// the odds but did NOT eliminate the crash. An intermittently-crashing app is
-// worse than losing fully-backgrounded analysis, so the batch now runs as a
-// bare loop: analysis auto-starts, survives in-app navigation (module-level
-// state), and respects the Wi-Fi guard, but pauses when the app is fully
-// backgrounded/closed and resumes on return. Proper always-on background
-// analysis needs a hand-rolled native foreground service (calls
-// startForeground() synchronously in onStartCommand, no JS-timing race) --
-// tracked as a follow-up. Flip to true only once that native service exists.
-const USE_FOREGROUND_SERVICE = false;
-let batchService: BatchServiceLike | null = null;
-if (USE_FOREGROUND_SERVICE) {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    batchService = require('react-native-background-actions').default as BatchServiceLike;
-  } catch {
-    batchService = null;
-  }
+const analysisService: AnalysisServiceLike | null =
+  (NativeModules.AnalysisService as AnalysisServiceLike | undefined) ?? null;
+
+const NOTIF_TITLE = 'Analyzing your music';
+function notifText(): string {
+  const {done, total, failed} = batchState;
+  return `${done}/${total}${failed.length ? ` · ${failed.length} failed` : ''}`;
 }
 
 // Stamped into the `meta` table (key 'model_version') after every successful
@@ -393,14 +381,29 @@ export function startAnalysisBatch(videoIds: string[], playlistId: string | null
   };
   emitBatch();
 
-  // Run the loop inside an Android foreground service (via
-  // react-native-background-actions) so it keeps going when the app is
-  // backgrounded or the screen is locked -- not just when the user switches
-  // screens (that's already handled by this being module-level state). The
-  // service shows a persistent "Analyzing N/M" notification and is torn down
-  // when the batch finishes or is cancelled. If the native module is
-  // unavailable (e.g. jest), the loop still runs, just without the service.
-  void runBatchWithForegroundService(videoIds, playlistId);
+  // Hold the process foreground (native AnalysisForegroundService) so the loop
+  // keeps running when the app is backgrounded/screen-off, then run the loop
+  // in JS. The service calls startForeground() synchronously in native code,
+  // so there's no JS-timing race (the bug that made the old lib crash). Bare
+  // loop if the module is missing (jest).
+  void runBatch(videoIds, playlistId);
+}
+
+async function runBatch(videoIds: string[], playlistId: string | null): Promise<void> {
+  try {
+    analysisService?.start(NOTIF_TITLE, `0/${videoIds.length}`);
+  } catch {
+    // never let a service hiccup stop analysis
+  }
+  try {
+    await batchLoop(videoIds, playlistId);
+  } finally {
+    try {
+      analysisService?.stop();
+    } catch {
+      // ignore
+    }
+  }
 }
 
 async function batchLoop(videoIds: string[], playlistId: string | null): Promise<void> {
@@ -424,61 +427,14 @@ async function batchLoop(videoIds: string[], playlistId: string | null): Promise
       failed: ok ? batchState.failed : [...batchState.failed, videoIds[i]],
     };
     emitBatch();
-    if (batchService?.isRunning()) {
-      const {done, total, failed} = batchState;
-      await batchService
-        .updateNotification({
-          taskDesc: `${done}/${total}${failed.length ? ` · ${failed.length} failed` : ''}`,
-        })
-        .catch(() => {});
+    try {
+      analysisService?.update(NOTIF_TITLE, notifText());
+    } catch {
+      // ignore notification-update failures
     }
   }
   batchState = {...batchState, running: false};
   emitBatch();
-}
-
-async function runBatchWithForegroundService(
-  videoIds: string[],
-  playlistId: string | null,
-): Promise<void> {
-  if (!batchService) {
-    // No foreground-service module (tests / unsupported) -- run bare.
-    await batchLoop(videoIds, playlistId);
-    return;
-  }
-  const options = {
-    taskName: 'flowstateAnalysis',
-    taskTitle: 'Analyzing your music',
-    taskDesc: `0/${videoIds.length}`,
-    taskIcon: {name: 'ic_launcher', type: 'mipmap'},
-    color: '#5b8def',
-    linkingURI: 'flowstate://library',
-    // REQUIRED on Android 14+ (targetSDK 34+): the service must start with a
-    // declared foregroundServiceType or the OS kills the process
-    // (InvalidForegroundServiceTypeException "type none"). Analysis downloads +
-    // processes audio -> dataSync. Must also be declared in AndroidManifest on
-    // the RNBackgroundActionsTask service + hold FOREGROUND_SERVICE_DATA_SYNC.
-    foregroundServiceType: ['dataSync'],
-  };
-  try {
-    // BackgroundService.start runs the task (our loop) inside the FGS and
-    // resolves when the task returns; stop() removes the notification.
-    // Yield ~1.2s at the very start of the task BEFORE any heavy work so the
-    // service's startForeground() call wins Android's 5s window -- kicking off
-    // analyzeSong (network + native decode) immediately congests the bridge
-    // and made the OS throw ForegroundServiceDidNotStartInTimeException,
-    // crashing the app intermittently on Android 14/15.
-    await batchService.start(async () => {
-      await new Promise(r => setTimeout(r, 1200));
-      await batchLoop(videoIds, playlistId);
-    }, options);
-  } catch {
-    // Starting the service failed (e.g. OS restriction) -- fall back to a
-    // bare loop so analysis still proceeds while the app is foregrounded.
-    if (batchState.running && batchState.done === 0) await batchLoop(videoIds, playlistId);
-  } finally {
-    await batchService.stop().catch(() => {});
-  }
 }
 
 /** Re-run just the failed songs from the last batch (the "retry" action). */
