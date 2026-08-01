@@ -21,7 +21,8 @@ along the way.
    - [Step 4 — Vibe shuffle: walking between nearby spots](#step-4--vibe-shuffle-walking-between-nearby-spots)
 3. [Does it learn / evolve?](#3-does-it-learn--evolve)
 4. [The biggest errors we fought through](#4-the-biggest-errors-we-fought-through)
-5. [Where it landed + the one lesson](#5-where-it-landed--the-one-lesson)
+5. [The parity gap we caught after release (resampling)](#5-the-parity-gap-we-caught-after-release-resampling)
+6. [Where it landed + the one lesson](#6-where-it-landed--the-one-lesson)
 
 ---
 
@@ -320,7 +321,102 @@ faster). The final packaging pass caught a stray `debuggable true` on release bu
 
 ---
 
-## 5. Where it landed + the one lesson
+## 5. The parity gap we caught after release (resampling)
+
+After `v0.3.0-alpha` shipped, we went back and stress-tested the one claim we'd only
+half-proven: *"the phone fingerprints a song exactly as well as the reference computer
+(essentia) does."* It turned out to be **not quite true on real songs** — and chasing
+it down led to a real fix. This is the story, in plain language.
+
+### The suspicion
+The parity gate that gave us "cosine 1.0" only ever ran on **synthetic test sounds**
+(beeps, noise, chords), and it fed them in **past** the first two steps of the pipeline
+(unpacking the audio file + shrinking it to 16 kHz). So "perfect match" was proven for
+the *back half* of the process, on *fake* audio. The front half, on *real* songs, was
+never checked.
+
+### Finding it — like a detective ruling out suspects
+1. **Test for real.** Took 5 real songs. Fed the **identical file** to both the phone
+   and essentia, all steps, and compared the fingerprints. They were **~5% off**
+   (cosine 0.934–0.967), not the ~0% we'd claimed. So the gap was real.
+2. **Rule out "different chunk."** Maybe the two just analyzed different 2-minute slices
+   of the song? Shifted essentia's slice by several seconds — the fingerprint barely
+   moved (still 0.997). Not the cause.
+3. **Catch the culprit.** The front half has two suspect steps: *unpacking* the audio
+   and *shrinking* it to 16 kHz. I took essentia's own good unpacking, then re-did
+   **only the shrink** the phone's cheap way — and the exact ~5% error reappeared. That
+   pinned it: **the shrink step was guilty; unpacking was innocent.**
+
+### What "shrinking" means
+Digital audio is the speaker's position measured very fast — a song file measures it
+**44,100 times per second**. The AI model only wants **16,000 times per second**. So
+before analysis we convert 44,100 → 16,000 measurements per second. Fewer data points =
+"shrinking" (the real word is **resampling**). You can't just keep every ~3rd
+measurement — that injects fake tones (**aliasing**). You have to *recompute* the new
+points smoothly. **How well you recompute them was the whole bug.**
+
+### Cheap way vs proper way
+
+The old audio has values at whole positions 0, 1, 2, 3… To shrink, you need values at
+**in-between** spots — e.g. position 2.76, then 5.51, then 8.27… (because 44,100 ÷
+16,000 ≈ 2.76 apart). Each time: *what's the value at 2.76, given the neighbors?*
+
+**Cheap way — straight line between 2 dots (linear interpolation).**
+Look at the 2 nearest points (2 and 3), draw a straight line, read the value at 2.76.
+Uses 2 points, 1 step. Fast — but a sound wave *curves* between points, so the
+straight-line guess cuts corners and smears the sound (and lets fake high tones
+through). This is what was shipping.
+
+**Proper way — smooth curve through many dots (windowed-sinc).**
+To find 2.76, use **many** nearby points (we use 64 on each side) and add them up, each
+with a **weight** from a special ripple-shaped curve (a *sinc*): nearest points count
+most, far ones ripple smaller.
+
+```
+new value at 2.76 = w1·(pt 2) + w2·(pt 3) + w3·(pt 4) + …   (~128 points)
+
+weight   │      ╱╲          ← nearest points matter most
+         │ ╱╲  ╱  ╲  ╱╲
+         │╱  ╲╱    ╲╱  ╲     ← far points matter a little (alternating +/–)
+```
+
+That ripple curve is the mathematically-correct recipe for **reconstructing the true
+smooth wave** through all those points — so you read its *real* value at 2.76 instead of
+a straight-line guess. It also acts as a **filter that removes the too-high tones** that
+would otherwise alias.
+
+→ *Connect-the-dots: cheap draws straight lines between dots (jagged, wrong); proper
+fits one smooth curve through many dots at once (matches the real shape). Same as
+resizing a photo with the "quick" setting vs a proper resize.*
+
+### Fixing it — matching the exact recipe
+Knowing "use a proper shrink" wasn't enough — essentia uses a *specific* recipe, and we
+had to match it. First attempt (a decent windowed-sinc) improved 5% off → ~2% off, but
+not a match; and just using more points didn't help. So I ran a **bake-off**: many
+recipes with different settings, each measured against essentia. The winner — a
+**Kaiser** window, 64 points per side, cutoff pulled to 0.90 of the limit (leaving a
+"transition band" that kills the last aliasing) — hit the target. Ported that exact
+recipe into the phone's code (`AudioDecoder.kt`, replacing `linearResample` with
+`sincResample`), rebuilt, and re-ran the same 5 songs on the real device.
+
+### Result
+
+| Shrink method | how far off (min cosine) | mean |
+|---------------|-------------------------:|-----:|
+| straight-line (was shipping) | 0.934 | 0.957 |
+| decent sinc (Hann window) | 0.965 | 0.977 |
+| **proper sinc (Kaiser, tuned)** | **0.994** | **0.996** ✅ |
+
+Now the phone fingerprints real songs **essentially identically** to the reference —
+proven end-to-end on actual music, not just test tones. A real-song parity check was
+added to the app so this can't silently regress. Cost: the proper shrink is a bit slower
+(~14 s/song more); a precomputed lookup table can recover most of that later.
+
+**The method, reused:** *suspect the claim → test for real → isolate the guilty step by
+elimination → find the exact recipe that matches → write it in → re-verify on the real
+device.* Same shape as every other bug in this project.
+
+## 6. Where it landed + the one lesson
 
 `v0.3.0-alpha` — on-device analysis, no PC required.
 
