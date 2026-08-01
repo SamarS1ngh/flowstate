@@ -125,11 +125,15 @@ export default function PlaylistScreen({route, navigation}: Props) {
 
   const unanalyzedIds = useMemo(() => songs.filter(s => !s.hasVibe).map(s => s.videoId), [songs]);
 
-  // This screen's batch = the global batch iff it belongs to this playlist.
+  // This screen's own explicit batch (playlistId matches).
   const myBatch = batch && batch.playlistId === playlistId ? batch : null;
   const analyzing = myBatch?.running ?? false;
-  // Some OTHER playlist is analyzing right now (only one batch runs at a time).
-  const otherBusy = (batch?.running ?? false) && batch?.playlistId !== playlistId;
+  // The global auto-analyze batch (whole library, playlistId === null) --
+  // this playlist's songs get analyzed as part of it.
+  const libraryBatch = batch?.running && batch.playlistId === null ? batch : null;
+  // Some OTHER specific playlist is analyzing (rare; only one batch at a time).
+  const otherBusy =
+    (batch?.running ?? false) && batch?.playlistId !== playlistId && batch?.playlistId !== null;
   const failedCount = myBatch && !myBatch.running ? myBatch.failed.length : 0;
 
   // "Analyze playlist": hands the not-yet-analyzed songs to the module-level
@@ -292,6 +296,17 @@ export default function PlaylistScreen({route, navigation}: Props) {
                   <Text style={styles.analyzeText}>
                     Analyzing {myBatch!.done}/{myBatch!.total}
                     {myBatch!.failed.length > 0 ? ` · ${myBatch!.failed.length} failed` : ''}…
+                  </Text>
+                  <Pressable onPress={onCancelAnalyze} hitSlop={8}>
+                    <Text style={styles.cancelText}>Cancel</Text>
+                  </Pressable>
+                </View>
+              ) : libraryBatch ? (
+                <View style={styles.analyzeRow}>
+                  <ActivityIndicator color={colors.accent} size="small" />
+                  <Text style={styles.analyzeText}>
+                    Analyzing library {libraryBatch.done}/{libraryBatch.total}
+                    {libraryBatch.failed.length > 0 ? ` · ${libraryBatch.failed.length} failed` : ''}…
                   </Text>
                   <Pressable onPress={onCancelAnalyze} hitSlop={8}>
                     <Text style={styles.cancelText}>Cancel</Text>

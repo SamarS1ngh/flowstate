@@ -1,4 +1,4 @@
-import React, {useCallback, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Alert,
   FlatList,
@@ -25,6 +25,11 @@ import Chip from '../ui/Chip';
 import IconButton from '../ui/IconButton';
 import ListRow from '../ui/ListRow';
 import {filterSongs, filterPlaylists} from '../library/search';
+import {
+  autoStartAnalysis,
+  subscribeAnalysisBatch,
+  type BatchState,
+} from '../analyze/analyzer';
 import {colors, radii, spacing, type} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Library'>;
@@ -55,6 +60,7 @@ export default function LibraryScreen({navigation}: Props) {
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>('playlists');
   const [search, setSearch] = useState('');
+  const [batch, setBatch] = useState<BatchState | null>(null);
   const [startingId, setStartingId] = useState<string | null>(null);
   // Prevents auto-sync from firing again every time this screen regains
   // focus in the same app session (e.g. navigating Library -> Player ->
@@ -200,6 +206,21 @@ export default function LibraryScreen({navigation}: Props) {
     [visibleSongs, navigation],
   );
 
+  // Mirror the global analysis batch for a small "Analyzing N/M" status.
+  useEffect(() => subscribeAnalysisBatch(setBatch), []);
+
+  // AUTO-ANALYZE: once the library is loaded, kick off a background analysis
+  // of everything not yet analyzed (deduped by videoId across all playlists).
+  // autoStartAnalysis is idempotent per session + respects the user's toggle,
+  // so this fires whenever allSongs changes but only actually starts once.
+  useEffect(() => {
+    const unanalyzed = allSongs.filter(s => !s.hasVibe).map(s => s.videoId);
+    void autoStartAnalysis(unanalyzed);
+  }, [allSongs]);
+
+  // A running global auto-batch (playlistId === null), for the status line.
+  const autoBatch = batch?.running && batch.playlistId === null ? batch : null;
+
   if (loading) {
     return (
       <View style={styles.center}>
@@ -286,6 +307,13 @@ export default function LibraryScreen({navigation}: Props) {
       {syncStatus && !syncing ? (
         <View style={styles.statusBanner}>
           <Text style={styles.statusBannerText}>{syncStatus}</Text>
+        </View>
+      ) : autoBatch ? (
+        <View style={styles.statusBanner}>
+          <Text style={styles.statusBannerText}>
+            Analyzing your library in the background · {autoBatch.done}/{autoBatch.total}
+            {autoBatch.failed.length > 0 ? ` · ${autoBatch.failed.length} failed` : ''}
+          </Text>
         </View>
       ) : null}
       {filter === 'playlists' ? (

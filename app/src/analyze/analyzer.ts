@@ -16,6 +16,7 @@
 // button a user is staring at, so silent-log-and-continue is the right
 // default.
 import * as RNFS from '@dr.pogodin/react-native-fs';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {resolveStreamUrl} from '../stream/resolver';
 import {decodeAndMel} from './audio';
 import {analyzeEmbeddingAndMoods} from './tflite';
@@ -441,4 +442,69 @@ export function retryFailedAnalysis(playlistId: string | null): void {
   const toRetry = batchState.failed;
   if (toRetry.length === 0) return;
   startAnalysisBatch(toRetry, playlistId);
+}
+
+// --- auto-analyze ------------------------------------------------------
+// Analysis should just HAPPEN once the library is synced -- no manual
+// "Analyze playlist" tap. The whole library is analyzed in the background
+// (foreground service) as one global batch (playlistId = null), deduped by
+// videoId so a song in five playlists is analyzed once. A per-session guard
+// keeps re-focusing Library from restarting it, and a persisted toggle lets
+// the user turn it off.
+
+const AUTO_ANALYZE_KEY = 'flowstate.autoAnalyze.v1';
+let autoAnalyzeEnabled = true;
+let autoAnalyzePrefLoaded = false;
+let autoStartedThisSession = false;
+
+async function ensureAutoPref(): Promise<void> {
+  if (autoAnalyzePrefLoaded) return;
+  try {
+    const v = await AsyncStorage.getItem(AUTO_ANALYZE_KEY);
+    autoAnalyzeEnabled = v == null ? true : v === '1';
+  } catch {
+    autoAnalyzeEnabled = true;
+  }
+  autoAnalyzePrefLoaded = true;
+}
+
+export async function isAutoAnalyzeEnabled(): Promise<boolean> {
+  await ensureAutoPref();
+  return autoAnalyzeEnabled;
+}
+
+export async function setAutoAnalyzeEnabled(enabled: boolean): Promise<void> {
+  autoAnalyzeEnabled = enabled;
+  autoAnalyzePrefLoaded = true;
+  try {
+    await AsyncStorage.setItem(AUTO_ANALYZE_KEY, enabled ? '1' : '0');
+  } catch {
+    // best-effort; in-memory value still applies this session
+  }
+  if (!enabled && batchState.running && batchState.playlistId === null) {
+    // Turning auto off cancels the *global* auto batch (leaves an explicit
+    // per-playlist batch alone).
+    cancelAnalysisBatch();
+  }
+}
+
+/**
+ * Auto-start a background analysis of the whole library (all currently
+ * unanalyzed songs) as a global batch. No-op if: auto is off, we already
+ * auto-started this app session, a batch is already running, or there's
+ * nothing to analyze. Safe to call on every Library focus -- the guards make
+ * it idempotent for the session.
+ */
+export async function autoStartAnalysis(unanalyzedVideoIds: string[]): Promise<void> {
+  await ensureAutoPref();
+  if (
+    !autoAnalyzeEnabled ||
+    autoStartedThisSession ||
+    batchState.running ||
+    unanalyzedVideoIds.length === 0
+  ) {
+    return;
+  }
+  autoStartedThisSession = true;
+  startAnalysisBatch(unanalyzedVideoIds, null);
 }

@@ -5,6 +5,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -18,6 +19,7 @@ import {importVibesDb} from '../db/vibesDb';
 import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
 import {colors, radii, spacing, type} from '../ui/theme';
 import {analyzeEmbeddingAndMoods} from '../analyze/tflite';
+import {isAutoAnalyzeEnabled, setAutoAnalyzeEnabled} from '../analyze/analyzer';
 import {
   runMelFixtureParity,
   runRealSongDecodeSanity,
@@ -37,6 +39,24 @@ export default function SettingsScreen({navigation}: Props) {
   const [melParityRunning, setMelParityRunning] = useState(false);
   const [realSongProbing, setRealSongProbing] = useState(false);
   const [realSongPathParityRunning, setRealSongPathParityRunning] = useState(false);
+  const [autoAnalyze, setAutoAnalyze] = useState(true);
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      void isAutoAnalyzeEnabled().then(v => {
+        if (!cancelled) setAutoAnalyze(v);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }, []),
+  );
+
+  const onToggleAutoAnalyze = (v: boolean) => {
+    setAutoAnalyze(v); // optimistic
+    void setAutoAnalyzeEnabled(v);
+  };
 
   useFocusEffect(
     useCallback(() => {
@@ -273,6 +293,22 @@ export default function SettingsScreen({navigation}: Props) {
       style={styles.container}
       contentContainerStyle={styles.content}>
       <View style={styles.section}>
+        <View style={styles.toggleRow}>
+          <View style={styles.toggleTextCol}>
+            <Text style={styles.sectionTitle}>Auto-analyze library</Text>
+            <Text style={styles.toggleDesc}>
+              Analyze your songs in the background so vibe shuffle works. Runs once per
+              song (shared across playlists) and keeps going when the app is closed.
+            </Text>
+          </View>
+          <Switch
+            value={autoAnalyze}
+            onValueChange={onToggleAutoAnalyze}
+            trackColor={{true: colors.accent, false: colors.surfaceRaised}}
+          />
+        </View>
+      </View>
+      <View style={styles.section}>
         <Text style={styles.sectionTitle}>YouTube Music account</Text>
         {!authChecked ? (
           <ActivityIndicator color={colors.accent} />
@@ -456,6 +492,9 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {...type.headline, marginBottom: spacing.xs},
   sectionBody: {color: colors.textSecondary, fontSize: 14, marginBottom: spacing.lg, lineHeight: 20},
+  toggleRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'},
+  toggleTextCol: {flex: 1, paddingRight: spacing.lg},
+  toggleDesc: {color: colors.textSecondary, fontSize: 13, lineHeight: 18},
   input: {
     borderWidth: 1,
     borderColor: colors.border,
