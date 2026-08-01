@@ -315,6 +315,12 @@ export default function LibraryScreen({navigation}: Props) {
             {autoBatch.failed.length > 0 ? ` · ${autoBatch.failed.length} failed` : ''}
           </Text>
         </View>
+      ) : batch?.pausedForNetwork ? (
+        <View style={styles.statusBanner}>
+          <Text style={styles.statusBannerText}>
+            Analysis paused — waiting for Wi-Fi (change in Settings)
+          </Text>
+        </View>
       ) : null}
       {filter === 'playlists' ? (
         <PlaylistList

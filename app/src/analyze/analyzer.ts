@@ -16,6 +16,7 @@
 // button a user is staring at, so silent-log-and-continue is the right
 // default.
 import {AppState} from 'react-native';
+import NetInfo from '@react-native-community/netinfo';
 import * as RNFS from '@dr.pogodin/react-native-fs';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {resolveStreamUrl} from '../stream/resolver';
@@ -312,6 +313,9 @@ export interface BatchState {
   ok: number;
   /** videoIds whose analysis attempt failed (network/decode/etc). */
   failed: string[];
+  /** True when the batch stopped because Wi-Fi-only is on but we're on
+   * cellular -- it auto-resumes when Wi-Fi returns (see pendingResume). */
+  pausedForNetwork: boolean;
 }
 
 const IDLE: BatchState = {
@@ -321,6 +325,7 @@ const IDLE: BatchState = {
   done: 0,
   ok: 0,
   failed: [],
+  pausedForNetwork: false,
 };
 
 let batchState: BatchState = IDLE;
@@ -360,6 +365,7 @@ export function cancelAnalysisBatch(): void {
 export function startAnalysisBatch(videoIds: string[], playlistId: string | null): void {
   if (batchState.running) return;
   batchCancelled = false;
+  pendingResume = null;
   batchState = {
     running: true,
     playlistId,
@@ -367,6 +373,7 @@ export function startAnalysisBatch(videoIds: string[], playlistId: string | null
     done: 0,
     ok: 0,
     failed: [],
+    pausedForNetwork: false,
   };
   emitBatch();
 
@@ -377,18 +384,28 @@ export function startAnalysisBatch(videoIds: string[], playlistId: string | null
   // service shows a persistent "Analyzing N/M" notification and is torn down
   // when the batch finishes or is cancelled. If the native module is
   // unavailable (e.g. jest), the loop still runs, just without the service.
-  void runBatchWithForegroundService(videoIds);
+  void runBatchWithForegroundService(videoIds, playlistId);
 }
 
-async function batchLoop(videoIds: string[]): Promise<void> {
-  for (const videoId of videoIds) {
+async function batchLoop(videoIds: string[], playlistId: string | null): Promise<void> {
+  for (let i = 0; i < videoIds.length; i++) {
     if (batchCancelled) break;
-    const ok = await analyzeSong(videoId);
+    // Wi-Fi guard: don't burn mobile data. If the user requires Wi-Fi and
+    // we're not on it, PAUSE here -- remember the remaining songs and let the
+    // network/appstate listener resume when Wi-Fi is back. analyzeSong skips
+    // already-done songs, so resuming re-covers the remainder cleanly.
+    if (!allowedNetworkNow()) {
+      pendingResume = {ids: videoIds.slice(i), playlistId};
+      batchState = {...batchState, running: false, pausedForNetwork: true};
+      emitBatch();
+      return;
+    }
+    const ok = await analyzeSong(videoIds[i]);
     batchState = {
       ...batchState,
       done: batchState.done + 1,
       ok: batchState.ok + (ok ? 1 : 0),
-      failed: ok ? batchState.failed : [...batchState.failed, videoId],
+      failed: ok ? batchState.failed : [...batchState.failed, videoIds[i]],
     };
     emitBatch();
     if (batchService?.isRunning()) {
@@ -404,10 +421,13 @@ async function batchLoop(videoIds: string[]): Promise<void> {
   emitBatch();
 }
 
-async function runBatchWithForegroundService(videoIds: string[]): Promise<void> {
+async function runBatchWithForegroundService(
+  videoIds: string[],
+  playlistId: string | null,
+): Promise<void> {
   if (!batchService) {
     // No foreground-service module (tests / unsupported) -- run bare.
-    await batchLoop(videoIds);
+    await batchLoop(videoIds, playlistId);
     return;
   }
   const options = {
@@ -427,11 +447,19 @@ async function runBatchWithForegroundService(videoIds: string[]): Promise<void> 
   try {
     // BackgroundService.start runs the task (our loop) inside the FGS and
     // resolves when the task returns; stop() removes the notification.
-    await batchService.start(() => batchLoop(videoIds), options);
+    // Yield ~1.2s at the very start of the task BEFORE any heavy work so the
+    // service's startForeground() call wins Android's 5s window -- kicking off
+    // analyzeSong (network + native decode) immediately congests the bridge
+    // and made the OS throw ForegroundServiceDidNotStartInTimeException,
+    // crashing the app intermittently on Android 14/15.
+    await batchService.start(async () => {
+      await new Promise(r => setTimeout(r, 1200));
+      await batchLoop(videoIds, playlistId);
+    }, options);
   } catch {
     // Starting the service failed (e.g. OS restriction) -- fall back to a
     // bare loop so analysis still proceeds while the app is foregrounded.
-    if (batchState.running && batchState.done === 0) await batchLoop(videoIds);
+    if (batchState.running && batchState.done === 0) await batchLoop(videoIds, playlistId);
   } finally {
     await batchService.stop().catch(() => {});
   }
@@ -443,6 +471,72 @@ export function retryFailedAnalysis(playlistId: string | null): void {
   const toRetry = batchState.failed;
   if (toRetry.length === 0) return;
   startAnalysisBatch(toRetry, playlistId);
+}
+
+// --- Wi-Fi / network guard --------------------------------------------
+// Auto-analyze downloads audio for the whole library; on cellular that can be
+// a lot of data. When "Wi-Fi only" is on (default), batches only run on Wi-Fi
+// (or ethernet) and PAUSE on cellular, auto-resuming when Wi-Fi is back and
+// the app is foregrounded (starting the foreground service from background is
+// itself disallowed). Manual/explicit batches respect the same setting -- if
+// you truly want cellular, turn the toggle off.
+
+const WIFI_ONLY_KEY = 'flowstate.analyzeWifiOnly.v1';
+let analyzeWifiOnly = true;
+let currentIsWifi = true; // optimistic until the first NetInfo fetch resolves
+let pendingResume: {ids: string[]; playlistId: string | null} | null = null;
+let netListenersArmed = false;
+
+function allowedNetworkNow(): boolean {
+  return !analyzeWifiOnly || currentIsWifi;
+}
+
+/** Resume a network-paused batch once Wi-Fi is back AND the app is active. */
+function maybeResume(): void {
+  if (!pendingResume) return;
+  if (batchState.running) return;
+  if (!autoAnalyzeEnabled && batchState.playlistId === null) return;
+  if (!allowedNetworkNow()) return;
+  if (AppState.currentState !== 'active') return; // never start FGS from bg
+  const {ids, playlistId} = pendingResume;
+  pendingResume = null;
+  startAnalysisBatch(ids, playlistId);
+}
+
+function armNetListeners(): void {
+  if (netListenersArmed) return;
+  netListenersArmed = true;
+  NetInfo.addEventListener(state => {
+    currentIsWifi = state.type === 'wifi' || state.type === 'ethernet';
+    if (currentIsWifi) maybeResume();
+  });
+  AppState.addEventListener('change', s => {
+    if (s === 'active') maybeResume();
+  });
+  void NetInfo.fetch().then(state => {
+    currentIsWifi = state.type === 'wifi' || state.type === 'ethernet';
+  });
+}
+
+export async function isAnalyzeWifiOnly(): Promise<boolean> {
+  await ensureAutoPref();
+  return analyzeWifiOnly;
+}
+
+export async function setAnalyzeWifiOnly(enabled: boolean): Promise<void> {
+  analyzeWifiOnly = enabled;
+  try {
+    await AsyncStorage.setItem(WIFI_ONLY_KEY, enabled ? '1' : '0');
+  } catch {
+    // best-effort
+  }
+  if (enabled && batchState.running && !allowedNetworkNow()) {
+    // Turned Wi-Fi-only on while running on cellular -> the loop's per-song
+    // guard will pause at the next song; nothing else to do here.
+  } else if (!enabled) {
+    // Turned it off -> cellular is now allowed; pick up any paused batch.
+    maybeResume();
+  }
 }
 
 // --- auto-analyze ------------------------------------------------------
@@ -461,12 +555,18 @@ let autoStartedThisSession = false;
 async function ensureAutoPref(): Promise<void> {
   if (autoAnalyzePrefLoaded) return;
   try {
-    const v = await AsyncStorage.getItem(AUTO_ANALYZE_KEY);
-    autoAnalyzeEnabled = v == null ? true : v === '1';
+    const [auto, wifi] = await Promise.all([
+      AsyncStorage.getItem(AUTO_ANALYZE_KEY),
+      AsyncStorage.getItem(WIFI_ONLY_KEY),
+    ]);
+    autoAnalyzeEnabled = auto == null ? true : auto === '1';
+    analyzeWifiOnly = wifi == null ? true : wifi === '1';
   } catch {
     autoAnalyzeEnabled = true;
+    analyzeWifiOnly = true;
   }
   autoAnalyzePrefLoaded = true;
+  armNetListeners();
 }
 
 export async function isAutoAnalyzeEnabled(): Promise<boolean> {
@@ -517,6 +617,14 @@ export async function autoStartAnalysis(unanalyzedVideoIds: string[]): Promise<v
   setTimeout(() => {
     if (batchState.running) return;
     if (AppState.currentState !== 'active') return;
+    if (!allowedNetworkNow()) {
+      // On cellular with Wi-Fi-only on: don't start now. Park the work so the
+      // network/appstate listener starts it once Wi-Fi is back.
+      pendingResume = {ids: unanalyzedVideoIds, playlistId: null};
+      batchState = {...IDLE, pausedForNetwork: true};
+      emitBatch();
+      return;
+    }
     startAnalysisBatch(unanalyzedVideoIds, null);
   }, 4000);
 }

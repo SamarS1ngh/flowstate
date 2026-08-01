@@ -19,7 +19,12 @@ import {importVibesDb} from '../db/vibesDb';
 import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
 import {colors, radii, spacing, type} from '../ui/theme';
 import {analyzeEmbeddingAndMoods} from '../analyze/tflite';
-import {isAutoAnalyzeEnabled, setAutoAnalyzeEnabled} from '../analyze/analyzer';
+import {
+  isAutoAnalyzeEnabled,
+  setAutoAnalyzeEnabled,
+  isAnalyzeWifiOnly,
+  setAnalyzeWifiOnly,
+} from '../analyze/analyzer';
 import {
   runMelFixtureParity,
   runRealSongDecodeSanity,
@@ -40,12 +45,16 @@ export default function SettingsScreen({navigation}: Props) {
   const [realSongProbing, setRealSongProbing] = useState(false);
   const [realSongPathParityRunning, setRealSongPathParityRunning] = useState(false);
   const [autoAnalyze, setAutoAnalyze] = useState(true);
+  const [wifiOnly, setWifiOnly] = useState(true);
 
   useFocusEffect(
     useCallback(() => {
       let cancelled = false;
       void isAutoAnalyzeEnabled().then(v => {
         if (!cancelled) setAutoAnalyze(v);
+      });
+      void isAnalyzeWifiOnly().then(v => {
+        if (!cancelled) setWifiOnly(v);
       });
       return () => {
         cancelled = true;
@@ -56,6 +65,11 @@ export default function SettingsScreen({navigation}: Props) {
   const onToggleAutoAnalyze = (v: boolean) => {
     setAutoAnalyze(v); // optimistic
     void setAutoAnalyzeEnabled(v);
+  };
+
+  const onToggleWifiOnly = (v: boolean) => {
+    setWifiOnly(v);
+    void setAnalyzeWifiOnly(v);
   };
 
   useFocusEffect(
@@ -304,6 +318,20 @@ export default function SettingsScreen({navigation}: Props) {
           <Switch
             value={autoAnalyze}
             onValueChange={onToggleAutoAnalyze}
+            trackColor={{true: colors.accent, false: colors.surfaceRaised}}
+          />
+        </View>
+        <View style={[styles.toggleRow, {marginTop: spacing.lg}]}>
+          <View style={styles.toggleTextCol}>
+            <Text style={styles.sectionTitle}>Analyze on Wi-Fi only</Text>
+            <Text style={styles.toggleDesc}>
+              Analysis downloads audio. Keep this on to avoid using mobile data — it
+              pauses on cellular and resumes on Wi-Fi.
+            </Text>
+          </View>
+          <Switch
+            value={wifiOnly}
+            onValueChange={onToggleWifiOnly}
             trackColor={{true: colors.accent, false: colors.surfaceRaised}}
           />
         </View>
