@@ -130,7 +130,24 @@ async function analyzeSongUncached(videoId: string): Promise<boolean> {
     return false;
   }
 
-  return runExclusive(() => doAnalyze(videoId));
+  // Download UNLOCKED (network) so it can overlap another song's compute
+  // (the B3 pipeline); only the heavy compute stage takes the mutex, so at
+  // most one decode+mel+infer runs at a time across lazy + batch.
+  let tempPath: string | undefined;
+  try {
+    tempPath = await downloadStage(videoId);
+  } catch (e) {
+    console.warn(`[analyzer] analyzeSong(${videoId}) download failed`, e);
+    return false;
+  }
+  try {
+    return await runExclusive(() => computeStage(videoId, tempPath!));
+  } catch (e) {
+    console.warn(`[analyzer] analyzeSong(${videoId}) compute failed`, e);
+    return false;
+  } finally {
+    await RNFS.unlink(tempPath).catch(() => {});
+  }
 }
 
 // Per-stage timeouts (Plan D Task 6b): a batch "Analyze playlist" run must
@@ -170,85 +187,59 @@ function withTimeout<T>(promise: Promise<T>, ms: number, stage: string): Promise
   });
 }
 
-async function doAnalyze(videoId: string): Promise<boolean> {
-  let tempPath: string | undefined;
-  // __DEV__-gated stage timing (Plan D Task 6b): cheap enough to leave in
-  // permanently (a handful of Date.now() calls + one console.log per song),
-  // and stripped from release builds automatically since __DEV__ is
-  // compiled out -- see the Task 6b report for the profiled breakdown this
-  // produced on-device.
-  const t0 = __DEV__ ? Date.now() : 0;
+/**
+ * STAGE 1 (network, unlocked): resolve a stream URL + download the audio to a
+ * temp file. Returns the temp path; throws on failure. The caller owns
+ * deleting the file. 'lowest' bitrate: analysis downsamples to 16kHz mono, so
+ * audio quality is irrelevant to the fingerprint but download SIZE is the
+ * dominant network cost. A BOUNDED range header defeats googlevideo's
+ * stream throttling (see the long note this replaced).
+ */
+async function downloadStage(videoId: string): Promise<string> {
+  const stream = await withTimeout(
+    resolveStreamUrl(videoId, {quality: 'lowest'}),
+    STAGE_TIMEOUT_MS.resolve,
+    'resolve',
+  );
+  const tempPath = tempAudioPath(videoId);
+  const {promise} = RNFS.downloadFile({
+    fromUrl: stream.url,
+    toFile: tempPath,
+    headers: {...stream.headers, Range: 'bytes=0-12582911'},
+  });
+  const result = await withTimeout(promise, STAGE_TIMEOUT_MS.download, 'download');
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    await RNFS.unlink(tempPath).catch(() => {});
+    throw new Error(`download failed: HTTP ${result.statusCode}`);
+  }
+  return tempPath;
+}
+
+/**
+ * STAGE 2 (CPU-heavy, runs under the mutex): decode the downloaded file ->
+ * mel -> embedding + moods -> write the features row. Returns true if a row
+ * exists after (freshly written, or already present -- another path may have
+ * analyzed it while this one waited for the mutex). Throws on real failure.
+ * Does NOT delete tempPath (the caller does).
+ */
+async function computeStage(videoId: string, tempPath: string): Promise<boolean> {
+  const db = await ensureBaseSchema();
   try {
-    const db = await ensureBaseSchema();
-    try {
-      // Re-check now that we hold the lock: another queued job (or the
-      // pre-check race) may have analyzed this exact song while this call
-      // was waiting its turn.
-      if (db.hasFeatures(videoId)) return true;
-
-      // 'lowest' bitrate: analysis downsamples to 16kHz mono, so audio
-      // quality is irrelevant to the fingerprint but download SIZE is the
-      // dominant per-song cost -- the smallest audio format is fastest.
-      const stream = await withTimeout(
-        resolveStreamUrl(videoId, {quality: 'lowest'}),
-        STAGE_TIMEOUT_MS.resolve,
-        'resolve',
-      );
-      const tResolve = __DEV__ ? Date.now() : 0;
-
-      tempPath = tempAudioPath(videoId);
-      const {promise} = RNFS.downloadFile({
-        fromUrl: stream.url,
-        toFile: tempPath,
-        // A BOUNDED range (`bytes=0-N`, not open-ended `bytes=0-`) defeats
-        // googlevideo's stream throttling: an open-ended range is served at
-        // ~playback speed (so a multi-minute track blows past the download
-        // timeout -- the real cause of "analysis is so slow": every song was
-        // failing on download, not analyzing), while a bounded range is
-        // delivered in one fast burst. 12MB comfortably covers the whole of
-        // any lowest-bitrate audio-only track (a 10-min track at 64kbps is
-        // ~4.8MB); the server just caps at the real file end if smaller.
-        headers: {...stream.headers, Range: 'bytes=0-12582911'},
-      });
-      const result = await withTimeout(promise, STAGE_TIMEOUT_MS.download, 'download');
-      if (result.statusCode < 200 || result.statusCode >= 300) {
-        throw new Error(`download failed: HTTP ${result.statusCode}`);
-      }
-      const tDownload = __DEV__ ? Date.now() : 0;
-
-      const patches = await withTimeout(decodeAndMel(tempPath), STAGE_TIMEOUT_MS.decode, 'decode');
-      if (patches.length === 0) {
-        throw new Error('decodeAndMel produced 0 mel patches (silent, too-short, or undecodable audio)');
-      }
-      const tDecode = __DEV__ ? Date.now() : 0;
-
-      const {embedding, moods} = await withTimeout(
-        analyzeEmbeddingAndMoods(patches),
-        STAGE_TIMEOUT_MS.infer,
-        'infer',
-      );
-      const tInfer = __DEV__ ? Date.now() : 0;
-
-      db.storeFeatures(videoId, embedding, moods);
-      db.setMeta('model_version', MODEL_VERSION);
-      if (__DEV__) {
-        console.log(
-          `[analyzer] ${videoId} stage timings (ms): resolve=${tResolve - t0} ` +
-            `download=${tDownload - tResolve} decode+mel=${tDecode - tDownload} ` +
-            `infer=${tInfer - tDecode} total=${tInfer - t0} patches=${patches.length}`,
-        );
-      }
-      return true;
-    } finally {
-      db.close();
+    if (db.hasFeatures(videoId)) return true;
+    const patches = await withTimeout(decodeAndMel(tempPath), STAGE_TIMEOUT_MS.decode, 'decode');
+    if (patches.length === 0) {
+      throw new Error('decodeAndMel produced 0 mel patches (silent, too-short, or undecodable audio)');
     }
-  } catch (e) {
-    console.warn(`[analyzer] analyzeSong(${videoId}) failed`, e);
-    return false;
+    const {embedding, moods} = await withTimeout(
+      analyzeEmbeddingAndMoods(patches),
+      STAGE_TIMEOUT_MS.infer,
+      'infer',
+    );
+    db.storeFeatures(videoId, embedding, moods);
+    db.setMeta('model_version', MODEL_VERSION);
+    return true;
   } finally {
-    if (tempPath) {
-      await RNFS.unlink(tempPath).catch(() => {});
-    }
+    db.close();
   }
 }
 
@@ -336,6 +327,17 @@ let batchState: BatchState = IDLE;
 let batchCancelled = false;
 const batchListeners = new Set<(s: BatchState) => void>();
 
+// Wakeup channel for the pipelined batchLoop's parked producer/consumer.
+// Module-level (not local to batchLoop) so cancelAnalysisBatch() can WAKE a
+// parked loop -- otherwise setting batchCancelled while a loop is asleep on
+// `changed()` would hang it forever (the service would never tear down).
+let batchWaiters: Array<() => void> = [];
+function signalBatch(): void {
+  const ws = batchWaiters;
+  batchWaiters = [];
+  for (const w of ws) w();
+}
+
 function emitBatch() {
   const snapshot = {...batchState, failed: [...batchState.failed]};
   for (const l of batchListeners) l(snapshot);
@@ -358,6 +360,8 @@ export function subscribeAnalysisBatch(cb: (s: BatchState) => void): () => void 
 /** Cancel the running batch (stops before the next not-yet-attempted song). */
 export function cancelAnalysisBatch(): void {
   batchCancelled = true;
+  pendingResume = null; // an explicit cancel shouldn't auto-resume later
+  signalBatch(); // wake a parked producer/consumer so the loop can exit now
 }
 
 /**
@@ -406,34 +410,112 @@ async function runBatch(videoIds: string[], playlistId: string | null): Promise<
   }
 }
 
-async function batchLoop(videoIds: string[], playlistId: string | null): Promise<void> {
-  for (let i = 0; i < videoIds.length; i++) {
-    if (batchCancelled) break;
-    // Wi-Fi guard: don't burn mobile data. If the user requires Wi-Fi and
-    // we're not on it, PAUSE here -- remember the remaining songs and let the
-    // network/appstate listener resume when Wi-Fi is back. analyzeSong skips
-    // already-done songs, so resuming re-covers the remainder cleanly.
-    if (!allowedNetworkNow()) {
-      pendingResume = {ids: videoIds.slice(i), playlistId};
-      batchState = {...batchState, running: false, pausedForNetwork: true};
-      emitBatch();
-      return;
-    }
-    const ok = await analyzeSong(videoIds[i]);
-    batchState = {
-      ...batchState,
-      done: batchState.done + 1,
-      ok: batchState.ok + (ok ? 1 : 0),
-      failed: ok ? batchState.failed : [...batchState.failed, videoIds[i]],
-    };
-    emitBatch();
-    try {
-      analysisService?.update(NOTIF_TITLE, notifText());
-    } catch {
-      // ignore notification-update failures
-    }
+// Depth of the download-ahead buffer (B3 pipeline). Compute is the on-device
+// bottleneck, so 2 ready files is enough to keep the (single) compute stage
+// fed while the next downloads happen in parallel -- more just wastes disk
+// (see the "one cashier, one restocker" reasoning). Overlap makes throughput
+// ~max(download, compute)/song instead of download+compute.
+const DOWNLOAD_AHEAD = 2;
+
+function bumpBatch(ok: boolean, videoId: string): void {
+  batchState = {
+    ...batchState,
+    done: batchState.done + 1,
+    ok: batchState.ok + (ok ? 1 : 0),
+    failed: ok ? batchState.failed : [...batchState.failed, videoId],
+  };
+  emitBatch();
+  try {
+    analysisService?.update(NOTIF_TITLE, notifText());
+  } catch {
+    // ignore notification-update failures
   }
-  batchState = {...batchState, running: false};
+}
+
+async function alreadyAnalyzed(videoId: string): Promise<boolean> {
+  try {
+    const db = await ensureBaseSchema();
+    try {
+      return db.hasFeatures(videoId);
+    } finally {
+      db.close();
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pipelined batch: a producer downloads up to DOWNLOAD_AHEAD songs in parallel
+ * with a consumer that computes them one at a time (compute is CPU-bound and
+ * serialized via computeStage's mutex). Download of song N+1 overlaps compute
+ * of song N. Preserves the Wi-Fi guard, cancel, per-song ok/failed accounting,
+ * and paused-for-network resume of the old serial loop.
+ */
+async function batchLoop(videoIds: string[], playlistId: string | null): Promise<void> {
+  const ready: Array<{videoId: string; tempPath: string}> = [];
+  let producerDone = false;
+  let pausedForNet = false;
+  const changed = () => new Promise<void>(r => batchWaiters.push(r));
+
+  const producer = (async () => {
+    for (let i = 0; i < videoIds.length; i++) {
+      if (batchCancelled) break;
+      if (!allowedNetworkNow()) {
+        // Pause: hand the not-yet-downloaded remainder to the resume listener.
+        pendingResume = {ids: videoIds.slice(i), playlistId};
+        pausedForNet = true;
+        break;
+      }
+      const videoId = videoIds[i];
+      if (await alreadyAnalyzed(videoId)) {
+        bumpBatch(true, videoId); // shared across playlists -> no work needed
+        continue;
+      }
+      // Backpressure: don't get more than DOWNLOAD_AHEAD ahead of compute.
+      while (ready.length >= DOWNLOAD_AHEAD && !batchCancelled) await changed();
+      if (batchCancelled) break;
+      try {
+        const tempPath = await downloadStage(videoId);
+        ready.push({videoId, tempPath});
+      } catch (e) {
+        console.warn(`[analyzer] download ${videoId} failed`, e);
+        bumpBatch(false, videoId);
+      }
+      signalBatch();
+    }
+    producerDone = true;
+    signalBatch();
+  })();
+
+  const consumer = (async () => {
+    while (true) {
+      while (ready.length === 0 && !producerDone && !batchCancelled) await changed();
+      if (batchCancelled) break;
+      if (ready.length === 0) {
+        if (producerDone) break;
+        continue;
+      }
+      const {videoId, tempPath} = ready.shift()!;
+      signalBatch(); // freed a slot -> producer may download the next
+      try {
+        const ok = await runExclusive(() => computeStage(videoId, tempPath));
+        bumpBatch(ok, videoId);
+      } catch (e) {
+        console.warn(`[analyzer] compute ${videoId} failed`, e);
+        bumpBatch(false, videoId);
+      } finally {
+        await RNFS.unlink(tempPath).catch(() => {});
+      }
+    }
+  })();
+
+  await Promise.all([producer, consumer]);
+
+  // Clean up any downloaded-but-unconsumed files (cancel / pause path).
+  for (const {tempPath} of ready) await RNFS.unlink(tempPath).catch(() => {});
+
+  batchState = {...batchState, running: false, pausedForNetwork: pausedForNet};
   emitBatch();
 }
 
