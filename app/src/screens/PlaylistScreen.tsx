@@ -26,6 +26,7 @@ import {
   type BatchState,
 } from '../analyze/analyzer';
 import {isAnalyzable} from '../analyze/analyzable';
+import SkeletonList from '../ui/Skeleton';
 import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
@@ -241,9 +242,9 @@ export default function PlaylistScreen({route, navigation}: Props) {
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator color={colors.accent} />
-      </View>
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <SkeletonList />
+      </SafeAreaView>
     );
   }
 

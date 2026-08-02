@@ -26,6 +26,7 @@ import IconButton from '../ui/IconButton';
 import ListRow from '../ui/ListRow';
 import {filterSongs, filterPlaylists} from '../library/search';
 import {isAnalyzable} from '../analyze/analyzable';
+import SkeletonList from '../ui/Skeleton';
 import {
   autoStartAnalysis,
   subscribeAnalysisBatch,
@@ -226,9 +227,11 @@ export default function LibraryScreen({navigation}: Props) {
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator color={colors.accent} />
-      </View>
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <LibraryHeader loggedIn={loggedIn} syncing={syncing} onSync={runSync}
+          onSettings={() => navigation.navigate('Settings')} />
+        <SkeletonList />
+      </SafeAreaView>
     );
   }
 
