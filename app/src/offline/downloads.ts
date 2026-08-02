@@ -13,6 +13,39 @@ const OFFLINE_DIR = `${RNFS.DocumentDirectoryPath}/offline`;
 // so a few-minute track can take tens of seconds. Generous per-song ceiling.
 const DOWNLOAD_TIMEOUT_MS = 180_000;
 
+// In-memory index of downloaded videoId -> local path. offlineUrl() runs on the
+// playback HOT PATH (every load() and every prefetch); opening the db there
+// (ensureBaseSchema does a synchronous connection-open + full schema DDL on the
+// JS thread) stalled the UI and delayed playback. So we load the index from the
+// db exactly ONCE, then keep it in sync on add/remove/clear -- after that,
+// offlineUrl is a pure in-memory lookup for the common (no-downloads) case.
+let downloadIndex: Map<string, string> | null = null;
+let indexLoading: Promise<Map<string, string>> | null = null;
+
+async function getIndex(): Promise<Map<string, string>> {
+  if (downloadIndex) return downloadIndex;
+  if (!indexLoading) {
+    indexLoading = (async () => {
+      const db = await ensureBaseSchema();
+      try {
+        const m = new Map<string, string>();
+        for (const r of db.getDownloads()) m.set(r.videoId, r.path);
+        downloadIndex = m;
+        return m;
+      } finally {
+        db.close();
+      }
+    })();
+  }
+  return indexLoading;
+}
+
+/** Test-only: drop the in-memory index so each test reloads from its mock db. */
+export function _resetDownloadCacheForTests(): void {
+  downloadIndex = null;
+  indexLoading = null;
+}
+
 function filePath(videoId: string): string {
   // videoIds are [A-Za-z0-9_-]{11}; safe as a filename. Extension is cosmetic --
   // ExoPlayer sniffs the container (m4a/webm-opus/mp3) from content.
@@ -46,14 +79,9 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
  * song plays instantly from disk with no network resolve at all.
  */
 export async function offlineUrl(videoId: string): Promise<string | null> {
-  let path: string | null = null;
-  const db = await ensureBaseSchema();
-  try {
-    path = db.getDownloadPath(videoId);
-  } finally {
-    db.close();
-  }
-  if (!path) return null;
+  const idx = await getIndex();
+  const path = idx.get(videoId);
+  if (!path) return null; // common case: not downloaded -> no db, no fs touch
   // Guard against a dangling row whose file was deleted out from under us.
   const exists = await RNFS.exists(path);
   if (!exists) {
@@ -106,6 +134,7 @@ export async function downloadSong(videoId: string): Promise<boolean> {
     } finally {
       writeDb.close();
     }
+    (await getIndex()).set(videoId, path); // keep hot-path index in sync
     return true;
   } catch (e) {
     if (!(e instanceof StreamResolveError)) console.warn(`[downloads] ${videoId} failed`, e);
@@ -124,6 +153,7 @@ export async function removeDownload(videoId: string): Promise<void> {
   } finally {
     db.close();
   }
+  downloadIndex?.delete(videoId);
   if (path) await RNFS.unlink(path).catch(() => {});
 }
 
@@ -137,6 +167,7 @@ export async function removeAllDownloads(): Promise<number> {
   } finally {
     db.close();
   }
+  downloadIndex?.clear();
   for (const r of rows) await RNFS.unlink(r.path).catch(() => {});
   return rows.length;
 }
@@ -215,14 +246,8 @@ export async function startDownloadBatch(videoIds: string[]): Promise<void> {
   cancelled = false;
 
   // Skip already-downloaded ids up front so total/progress reflect real work.
-  const db = await ensureBaseSchema();
-  let pending: string[];
-  try {
-    const have = db.getDownloadedIds();
-    pending = videoIds.filter(id => !have.has(id));
-  } finally {
-    db.close();
-  }
+  const have = await getIndex();
+  const pending = videoIds.filter(id => !have.has(id));
 
   if (pending.length === 0) {
     batch = {...IDLE};
