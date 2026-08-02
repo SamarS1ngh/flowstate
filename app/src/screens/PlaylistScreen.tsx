@@ -25,6 +25,7 @@ import {
   subscribeAnalysisBatch,
   type BatchState,
 } from '../analyze/analyzer';
+import {isAnalyzable} from '../analyze/analyzable';
 import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
@@ -123,7 +124,10 @@ export default function PlaylistScreen({route, navigation}: Props) {
     setVibeSongs(analyzed);
   };
 
-  const unanalyzedIds = useMemo(() => songs.filter(s => !s.hasVibe).map(s => s.videoId), [songs]);
+  const unanalyzedIds = useMemo(
+    () => songs.filter(s => !s.hasVibe && isAnalyzable(s)).map(s => s.videoId),
+    [songs],
+  );
 
   // This screen's own explicit batch (playlistId matches).
   const myBatch = batch && batch.playlistId === playlistId ? batch : null;

@@ -25,6 +25,7 @@ import Chip from '../ui/Chip';
 import IconButton from '../ui/IconButton';
 import ListRow from '../ui/ListRow';
 import {filterSongs, filterPlaylists} from '../library/search';
+import {isAnalyzable} from '../analyze/analyzable';
 import {
   autoStartAnalysis,
   subscribeAnalysisBatch,
@@ -214,7 +215,9 @@ export default function LibraryScreen({navigation}: Props) {
   // autoStartAnalysis is idempotent per session + respects the user's toggle,
   // so this fires whenever allSongs changes but only actually starts once.
   useEffect(() => {
-    const unanalyzed = allSongs.filter(s => !s.hasVibe).map(s => s.videoId);
+    const unanalyzed = allSongs
+      .filter(s => !s.hasVibe && isAnalyzable(s))
+      .map(s => s.videoId);
     void autoStartAnalysis(unanalyzed);
   }, [allSongs]);
 
