@@ -231,26 +231,75 @@ describe('VibeQueue: reset', () => {
   });
 });
 
-describe('VibeQueue: peekNext (prefetch hint)', () => {
-  test('lock mode guesses an in-cluster candidate', () => {
+describe('VibeQueue: peekNext (commit-ahead for prefetch)', () => {
+  test('lock mode commits an in-cluster candidate', () => {
     const q = new VibeQueue(a1, 'lock', baseDeps());
     const guess = q.peekNext();
     expect(guess).not.toBeNull();
     expect(['a2', 'a3']).toContain(guess!.videoId);
   });
 
-  test('does NOT mutate queue state (history/rng untouched)', () => {
-    // Same rng + same first next() with and without a preceding peekNext must
-    // yield the same pick -- proving peek consumed no rng and pushed no history.
+  test('next() returns exactly the song peekNext committed (so the prefetch hits)', () => {
+    const q = new VibeQueue(a1, 'lock', baseDeps({rng: makeRng(7)}));
+    const committed = q.peekNext();
+    expect(committed).not.toBeNull();
+    // next() must return the SAME song peekNext promised -- that equality is
+    // the whole point: the controller prefetched committed.videoId's stream.
+    expect(q.next(null)?.videoId).toBe(committed!.videoId);
+  });
+
+  test('repeated peekNext returns the same committed pick (idempotent)', () => {
+    const q = new VibeQueue(a1, 'lock', baseDeps({rng: makeRng(7)}));
+    expect(q.peekNext()?.videoId).toBe(q.peekNext()?.videoId);
+  });
+
+  test('the committed pick still matches an un-peeked run (same rng => same next)', () => {
+    // With and without a preceding peekNext, the first next() yields the same
+    // song -- commit-ahead reorders WHEN the pick is computed, not WHICH.
     const withoutPeek = new VibeQueue(a1, 'lock', baseDeps({rng: makeRng(7)}));
     const first = withoutPeek.next(null);
 
     const withPeek = new VibeQueue(a1, 'lock', baseDeps({rng: makeRng(7)}));
     withPeek.peekNext();
-    withPeek.peekNext();
     const firstAfterPeek = withPeek.next(null);
 
     expect(firstAfterPeek?.videoId).toBe(first?.videoId);
+  });
+
+  test('rejectCurrent discards the committed pick (reject must re-pick)', () => {
+    const q = new VibeQueue(a1, 'lock', baseDeps());
+    const committed = q.peekNext();
+    q.rejectCurrent(committed!.videoId); // ban exactly the committed song
+    // Since pending was cleared, next() re-picks and can never return the
+    // now-banned song.
+    const pick = q.next(null);
+    expect(pick?.videoId).not.toBe(committed!.videoId);
+  });
+
+  test('setMode discards the committed pick', () => {
+    const q = new VibeQueue(a1, 'lock', baseDeps({rng: makeRng(3)}));
+    q.peekNext();
+    q.setMode('drift'); // must clear pending
+    // A fresh peek after the mode change re-commits (no crash, still valid).
+    const after = q.peekNext();
+    expect(after).not.toBeNull();
+  });
+
+  test('a no-op setMoodFilter(null) keeps the committed pick (PlayerScreen mount)', () => {
+    // Regression: PlayerScreen re-asserts setMoodFilter(null) on mount right
+    // after playFrom peeked+committed the next pick. That no-op must NOT discard
+    // the pick, or the very first skip always misses the prefetch cache.
+    const q = new VibeQueue(a1, 'lock', baseDeps({rng: makeRng(5)}));
+    const committed = q.peekNext();
+    q.setMoodFilter(null); // already null -> no real change
+    expect(q.next(null)?.videoId).toBe(committed!.videoId);
+  });
+
+  test('a no-op setMode(sameMode) keeps the committed pick', () => {
+    const q = new VibeQueue(a1, 'lock', baseDeps({rng: makeRng(5)}));
+    const committed = q.peekNext();
+    q.setMode('lock'); // already lock -> no change
+    expect(q.next(null)?.videoId).toBe(committed!.videoId);
   });
 
   test('returns null when scope has no analyzable neighbors', () => {

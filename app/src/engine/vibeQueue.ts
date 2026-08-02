@@ -36,6 +36,10 @@ export class VibeQueue implements QueueSource {
   // Ordered play-history: seed + every song returned by next(). Used only
   // for recencyFactor's songsSince lookup -- never mutated by lastPlayed.
   private history: VibeSong[];
+  // The next pick committed by peekNext() (for stream prefetch), consumed by
+  // next(). Cleared whenever the state it was picked under changes (reject,
+  // mode, mood filter, reset) so a stale pick is never played.
+  private pending: {song: VibeSong; kind: 'primary' | 'relaxed' | 'random'} | null = null;
 
   constructor(seed: VibeSong, mode: VibeMode, deps: VibeQueueDeps) {
     this.seed = seed;
@@ -58,12 +62,21 @@ export class VibeQueue implements QueueSource {
   }
 
   setMoodFilter(f: {key: string; min: number} | null): void {
+    const prev = this.moodFilter;
+    const changed = (prev?.key ?? null) !== (f?.key ?? null) || (prev?.min ?? null) !== (f?.min ?? null);
     this.moodFilter = f;
+    // Only a REAL filter change invalidates the committed next pick. PlayerScreen
+    // re-asserts setMoodFilter(null) on mount even when it's already null; clearing
+    // unconditionally there would discard the pick peekNext just committed for the
+    // prefetch, so the first skip would always miss the cache.
+    if (changed) this.pending = null;
   }
 
   setMode(m: VibeMode): void {
+    const changed = m !== this.mode;
     this.mode = m;
     this.label = VibeQueue.labelFor(m);
+    if (changed) this.pending = null; // lock/drift changes the center -> re-pick
   }
 
   rejectCurrent(rejectedId: string): void {
@@ -71,25 +84,51 @@ export class VibeQueue implements QueueSource {
     // is the caller's job -- see the VibeQueueDeps.feedback seam, which is
     // refreshed by the caller between vibe sessions, not by this class.
     this.sessionBans.add(rejectedId);
+    this.pending = null; // the committed next pick may be the just-rejected vibe
   }
 
   next(lastPlayed: Song | null): Song | null {
+    // If peekNext() already committed the next pick (to warm the stream
+    // prefetch), honor it so the prefetched song is the one that actually
+    // plays -- otherwise a weighted-random re-pick here would almost never
+    // match what was prefetched, defeating instant skips. rejectCurrent /
+    // setMode / setMoodFilter / reset clear `pending`, so a committed pick is
+    // only ever used while it's still valid for the current center/filters.
+    if (this.pending) {
+      const picked = this.pending;
+      this.pending = null;
+      // Re-fire the fallback status that producing this pick would have
+      // emitted, since peekNext() computed it silently.
+      if (picked.kind !== 'primary') this.onFallback?.(picked.kind);
+      this.history.push(picked.song);
+      return picked.song.song;
+    }
     const center = this.resolveCenter(lastPlayed);
-    const primaryThreshold = this.mode === 'lock' ? LOCK_THRESHOLD : DRIFT_THRESHOLD;
-
-    let picked = this.attemptWeightedPick(center, primaryThreshold);
-    if (!picked) {
-      this.onFallback?.('relaxed');
-      picked = this.attemptWeightedPick(center, primaryThreshold - RELAX_DELTA);
-    }
-    if (!picked) {
-      this.onFallback?.('random');
-      picked = this.randomFallback(center);
-    }
+    const picked = this.pickFrom(center, false);
     if (!picked) return null;
+    this.history.push(picked.song);
+    return picked.song.song;
+  }
 
-    this.history.push(picked);
-    return picked.song;
+  // Shared pick logic for both next() and peekNext(): weighted pick at the
+  // primary threshold, then a relaxed retry, then a uniform-random fallback.
+  // `silent` suppresses the onFallback callbacks so peekNext() (which runs
+  // ahead of playback) doesn't flash a stale "relaxed/random" status; next()
+  // re-emits it from the committed pick's `kind` when the song actually plays.
+  private pickFrom(
+    center: VibeSong,
+    silent: boolean,
+  ): {song: VibeSong; kind: 'primary' | 'relaxed' | 'random'} | null {
+    const primaryThreshold = this.mode === 'lock' ? LOCK_THRESHOLD : DRIFT_THRESHOLD;
+    let picked = this.attemptWeightedPick(center, primaryThreshold);
+    if (picked) return {song: picked, kind: 'primary'};
+    if (!silent) this.onFallback?.('relaxed');
+    picked = this.attemptWeightedPick(center, primaryThreshold - RELAX_DELTA);
+    if (picked) return {song: picked, kind: 'relaxed'};
+    if (!silent) this.onFallback?.('random');
+    picked = this.randomFallback(center);
+    if (picked) return {song: picked, kind: 'random'};
+    return null;
   }
 
   reset(seed: Song): void {
@@ -101,6 +140,7 @@ export class VibeQueue implements QueueSource {
     }
     this.seed = found;
     this.history = [found];
+    this.pending = null; // new seed -> discard any committed next pick
   }
 
   private resolveCenter(lastPlayed: Song | null): VibeSong {
@@ -167,22 +207,20 @@ export class VibeQueue implements QueueSource {
     return samplePick(weighted, this.rng);
   }
 
-  // Best-effort, NON-mutating guess at the likely next song for the controller's
-  // stream-prefetch cache only (see QueueSource.peekNext). next() samples
-  // weighted-random, so the actual next may differ -- here we return the single
-  // highest-weight candidate (the most probable pick) without touching history,
-  // rng, or fallback callbacks. A wrong guess just misses the prefetch cache.
+  // Commit the actual next pick ahead of time so the controller can prefetch
+  // its stream and the skip is instant (see QueueSource.peekNext). Unlike a
+  // best-effort guess, this runs the SAME weighted-random pick next() would,
+  // caches it in `pending`, and next() returns that exact song -- so the
+  // prefetched stream is always the one that plays. Center is resolved from
+  // the current history head (the song now playing), matching what next() will
+  // see as lastPlayed on the coming skip. Idempotent: repeated peeks return the
+  // same committed pick. Cleared by reject/mode/mood/reset so a committed pick
+  // is never played after the state it was picked under changed.
   peekNext(): Song | null {
-    const center = this.resolveCenter(null);
-    const primaryThreshold = this.mode === 'lock' ? LOCK_THRESHOLD : DRIFT_THRESHOLD;
-    let weighted = this.weightedCandidates(center, primaryThreshold);
-    if (weighted.length === 0) {
-      weighted = this.weightedCandidates(center, primaryThreshold - RELAX_DELTA);
+    if (!this.pending) {
+      this.pending = this.pickFrom(this.resolveCenter(null), true);
     }
-    if (weighted.length === 0) return null;
-    let best = weighted[0];
-    for (const w of weighted) if (w.weight > best.weight) best = w;
-    return best.item.song;
+    return this.pending?.song.song ?? null;
   }
 
   private randomFallback(center: VibeSong): VibeSong | null {

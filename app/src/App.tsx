@@ -21,6 +21,7 @@ import PlayerScreen from './screens/PlayerScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import LoginScreen from './auth/LoginScreen';
 import {openVibesDb} from './db/vibesDb';
+import {prewarmResolver} from './stream/resolver';
 import {FeedbackStore} from './engine/feedbackStore';
 import BottomNav, {BottomNavKey} from './ui/BottomNav';
 import MiniPlayer from './ui/MiniPlayer';
@@ -92,6 +93,11 @@ export default function App() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
+    // Warm the YouTube (Innertube) session immediately -- its ~6s player-JS
+    // cold boot otherwise lands on the first play, making the first song take
+    // seconds longer than the rest. Fire-and-forget so it overlaps app boot +
+    // the user browsing the library; by the time they hit play it's ready.
+    prewarmResolver();
     (async () => {
       // Bootstrap must never leave the app stuck rendering null forever.
       // Anything below can throw (setupPlayer() rejects with

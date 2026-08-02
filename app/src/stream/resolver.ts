@@ -93,6 +93,22 @@ async function innertube(): Promise<Innertube> {
   return yt;
 }
 
+// Innertube.create({retrieve_player: true}) downloads and parses YouTube's
+// player JS (signature/deciphering) -- a ~5-6s cold boot that otherwise lands
+// on the FIRST stream resolve, i.e. the moment the user hits play, so the first
+// song takes seconds longer than every song after it. Kick it off once at app
+// startup (fire-and-forget) so the session is already warm by the time anything
+// plays. Idempotent: the innertube() singleton means later resolves reuse it,
+// and a failed prewarm just leaves yt null for the real call to retry.
+let prewarmStarted = false;
+export function prewarmResolver(): void {
+  if (prewarmStarted) return;
+  prewarmStarted = true;
+  void innertube().catch(() => {
+    prewarmStarted = false; // let a later call retry the bootstrap
+  });
+}
+
 // Client fallback order. as of youtubei.js 17.2.0, ANDROID and WEB (the
 // brief's original pick) both come back with adaptive_formats that have
 // neither a direct `url` nor a `signature_cipher` — YouTube now withholds
