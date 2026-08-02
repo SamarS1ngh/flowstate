@@ -36,8 +36,16 @@ jest.mock('../src/stream/resolver', () => {
   };
 });
 
+// Offline lookup: default to "not downloaded" so these tests exercise the
+// streaming path. Individual tests can override offlineUrl to test disk play.
+jest.mock('../src/offline/downloads', () => ({
+  __esModule: true,
+  offlineUrl: jest.fn().mockResolvedValue(null),
+}));
+
 import TrackPlayer from 'react-native-track-player';
 import {resolveStreamUrl} from '../src/stream/resolver';
+import {offlineUrl} from '../src/offline/downloads';
 import {playFrom, skipToNext, skipToPrevious, consumeFallbackStatus} from '../src/player/controller';
 
 function song(id: string): Song {
@@ -116,11 +124,52 @@ describe('skipToNext: offline consecutive-failure cap', () => {
   });
 });
 
-describe('stream prefetch cache', () => {
+describe('offline-first playback', () => {
   const resolveMock = resolveStreamUrl as jest.Mock;
+  const offlineMock = offlineUrl as jest.Mock;
+  const addMock = TrackPlayer.add as jest.Mock;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    offlineMock.mockResolvedValue(null);
+    resolveMock.mockResolvedValue({url: 'https://example.com/s.mp3', headers: {}});
+  });
+
+  class ListSource implements QueueSource {
+    label = 'list';
+    private i = 0;
+    constructor(private ids: string[]) {}
+    reset(_s: Song): void {
+      this.i = 0;
+    }
+    next(_l: Song | null): Song | null {
+      this.i += 1;
+      return this.ids[this.i - 1] ? song(this.ids[this.i - 1]) : null;
+    }
+  }
+
+  test('plays a downloaded song from its local file without resolving a stream', async () => {
+    offlineMock.mockResolvedValue('file:///data/offline/a.audio');
+    await playFrom(new ListSource([]), song('a'));
+    expect(resolveMock).not.toHaveBeenCalled();
+    expect(addMock.mock.calls[0][0].url).toBe('file:///data/offline/a.audio');
+  });
+
+  test('falls back to streaming when the song is not downloaded', async () => {
+    offlineMock.mockResolvedValue(null);
+    await playFrom(new ListSource([]), song('a'));
+    expect(resolveMock).toHaveBeenCalledWith('a', expect.anything());
+    expect(addMock.mock.calls[0][0].url).toBe('https://example.com/s.mp3');
+  });
+});
+
+describe('stream prefetch cache', () => {
+  const resolveMock = resolveStreamUrl as jest.Mock;
+  const offlineMock = offlineUrl as jest.Mock;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    offlineMock.mockResolvedValue(null);
     resolveMock.mockResolvedValue({url: 'https://example.com/s.mp3', headers: {}});
   });
 
@@ -146,12 +195,18 @@ describe('stream prefetch cache', () => {
     return resolveMock.mock.calls.map(c => c[0]);
   }
 
+  // Prefetch fires an offline-check microtask before the network resolve, so
+  // flush pending microtasks before asserting on what was resolved.
+  const flush = () => new Promise<void>(r => setImmediate(() => r()));
+
   test('prefetches the next song and reuses it on skip (no second resolve)', async () => {
     await playFrom(new PeekSource(['b', 'c']), song('a'));
+    await flush();
     // load(a) resolved 'a' fresh, then schedulePrefetch resolved 'b' ahead.
     expect(resolvedIds()).toEqual(['a', 'b']);
 
     await skipToNext(); // -> b, should consume the cached 'b' stream
+    await flush();
     // 'b' is NOT resolved a second time; only the new prefetch of 'c' is added.
     expect(resolvedIds()).toEqual(['a', 'b', 'c']);
     expect(resolvedIds().filter(id => id === 'b')).toHaveLength(1);

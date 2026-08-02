@@ -1,6 +1,7 @@
 import TrackPlayer, {State} from 'react-native-track-player';
 import {Song} from '../types';
 import {resolveStreamUrl, StreamResolveError} from '../stream/resolver';
+import {offlineUrl} from '../offline/downloads';
 import {QueueSource} from './queue';
 
 let source: QueueSource | null = null;
@@ -27,10 +28,15 @@ function schedulePrefetch(): void {
     return;
   }
   if (prefetch?.videoId === nextSong.videoId) return; // already in flight
+  const videoId = nextSong.videoId;
   const meta = {title: nextSong.title, artist: nextSong.artist};
   prefetch = {
-    videoId: nextSong.videoId,
-    promise: resolveStreamUrl(nextSong.videoId, meta).catch(() => null),
+    videoId,
+    // Skip the network entirely if the next song is downloaded (load() will use
+    // the local file); otherwise resolve its stream ahead of the skip.
+    promise: offlineUrl(videoId).then(local =>
+      local ? {url: local} : resolveStreamUrl(videoId, meta).catch(() => null),
+    ),
   };
 }
 
@@ -78,10 +84,14 @@ export function consumeFallbackStatus(): FallbackKind | null {
 }
 
 async function load(song: Song): Promise<void> {
-  let stream: Stream | null = null;
+  // Offline-first: a downloaded song plays straight from disk -- no network
+  // resolve at all. offlineUrl() also self-heals a dangling row (file deleted)
+  // by returning null, so we fall through to streaming in that case.
+  const local = await offlineUrl(song.videoId);
+  let stream: Stream | null = local ? {url: local} : null;
   // Use the prefetched stream if it's for this exact song. On a prefetch miss
   // (wrong guess) or a failed prefetch (null), fall through to a fresh resolve.
-  if (prefetch && prefetch.videoId === song.videoId) {
+  if (!stream && prefetch && prefetch.videoId === song.videoId) {
     stream = await prefetch.promise;
     prefetch = null;
   }

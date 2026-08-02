@@ -26,6 +26,12 @@ import {
   type BatchState,
 } from '../analyze/analyzer';
 import {isAnalyzable} from '../analyze/analyzable';
+import {
+  startDownloadBatch,
+  cancelDownloadBatch,
+  subscribeDownloadBatch,
+  type DownloadBatchState,
+} from '../offline/downloads';
 import SkeletonList from '../ui/Skeleton';
 import type {Song} from '../types';
 import Chip from '../ui/Chip';
@@ -62,6 +68,8 @@ export default function PlaylistScreen({route, navigation}: Props) {
   // mirror its state here. `batch` is the global batch; it's only *this*
   // screen's batch when batch.playlistId === playlistId.
   const [batch, setBatch] = useState<BatchState | null>(null);
+  // Offline-download batch (module-level, like analysis) mirrored here.
+  const [dl, setDl] = useState<DownloadBatchState | null>(null);
 
   // Brief, auto-dismissing in-screen notice (no toast dependency in this
   // app) -- currently only used for the "vibe ON but this song isn't
@@ -112,6 +120,17 @@ export default function PlaylistScreen({route, navigation}: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playlistId]);
 
+  // Mirror the offline-download batch; each update also refreshes the list so
+  // freshly-downloaded songs pick up their ⬇ indicator.
+  useEffect(() => {
+    const unsub = subscribeDownloadBatch(s => {
+      setDl(s);
+      void refreshAnalyzed();
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playlistId]);
+
   // Re-reads songs + vibeSongs from the db -- called after any analysis
   // (lazy on-play or batch) writes a new features row, so "N analyzed",
   // the ♪? badges, and the Vibe shuffle button's enabled state all stay
@@ -129,6 +148,19 @@ export default function PlaylistScreen({route, navigation}: Props) {
     () => songs.filter(s => !s.hasVibe && isAnalyzable(s)).map(s => s.videoId),
     [songs],
   );
+
+  const notDownloadedIds = useMemo(
+    () => songs.filter(s => !s.hasDownload).map(s => s.videoId),
+    [songs],
+  );
+  const downloadedCount = songs.length - notDownloadedIds.length;
+  const downloading = dl?.running ?? false;
+
+  const onDownloadAll = () => {
+    if (downloading || notDownloadedIds.length === 0) return;
+    void startDownloadBatch(notDownloadedIds);
+  };
+  const onCancelDownload = () => cancelDownloadBatch();
 
   // This screen's own explicit batch (playlistId matches).
   const myBatch = batch && batch.playlistId === playlistId ? batch : null;
@@ -349,6 +381,36 @@ export default function PlaylistScreen({route, navigation}: Props) {
                 </Pressable>
               ) : null}
 
+              {downloading ? (
+                <View style={styles.analyzeRow}>
+                  <ActivityIndicator color={colors.accent} size="small" />
+                  <Text style={styles.analyzeText}>
+                    {dl!.cancelling
+                      ? 'Stopping…'
+                      : `Downloading ${dl!.done}/${dl!.total}${
+                          dl!.failed.length > 0 ? ` · ${dl!.failed.length} failed` : ''
+                        }…`}
+                  </Text>
+                  {!dl!.cancelling ? (
+                    <Pressable onPress={onCancelDownload} hitSlop={8}>
+                      <Text style={styles.cancelText}>Cancel</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : dl?.pausedForNetwork ? (
+                <Text style={styles.downloadStatus}>
+                  Downloads paused — waiting for Wi-Fi (change in Settings)
+                </Text>
+              ) : notDownloadedIds.length > 0 ? (
+                <Pressable style={styles.analyzeRow} onPress={onDownloadAll}>
+                  <Text style={styles.analyzeButtonText}>
+                    ⬇ Download for offline ({notDownloadedIds.length})
+                  </Text>
+                </Pressable>
+              ) : songs.length > 0 ? (
+                <Text style={styles.downloadStatus}>⬇ Downloaded for offline ✓</Text>
+              ) : null}
+
               {notice ? (
                 <View style={styles.noticeBanner}>
                   <Text style={styles.noticeText}>{notice}</Text>
@@ -361,7 +423,11 @@ export default function PlaylistScreen({route, navigation}: Props) {
               videoId={item.videoId}
               title={item.title}
               titleBadge={!item.hasVibe ? '♪?' : undefined}
-              subtitle={item.durationS != null ? `${item.artist} · ${formatDuration(item.durationS)}` : item.artist}
+              subtitle={`${
+                item.durationS != null
+                  ? `${item.artist} · ${formatDuration(item.durationS)}`
+                  : item.artist
+              }${item.hasDownload ? ' · ⬇' : ''}`}
               disabled={startingId !== null}
               onPress={() => playIndex(index)}
               trailing={
@@ -427,4 +493,5 @@ const styles = StyleSheet.create({
   analyzeText: {color: colors.textSecondary, fontSize: 13},
   analyzeButtonText: {color: colors.textSecondary, fontSize: 13, textDecorationLine: 'underline'},
   cancelText: {color: colors.textTertiary, fontSize: 13, fontWeight: '700'},
+  downloadStatus: {color: colors.textTertiary, fontSize: 13, marginTop: spacing.lg},
 });

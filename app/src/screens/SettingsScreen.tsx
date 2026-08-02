@@ -17,6 +17,7 @@ import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
 import {importVibesDb} from '../db/vibesDb';
 import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
+import {getStorageInfo, removeAllDownloads} from '../offline/downloads';
 import {colors, radii, spacing, type} from '../ui/theme';
 import {analyzeEmbeddingAndMoods} from '../analyze/tflite';
 import {
@@ -36,6 +37,13 @@ import {
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1024) return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+
 export default function SettingsScreen({navigation}: Props) {
   const [importingFile, setImportingFile] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -49,6 +57,8 @@ export default function SettingsScreen({navigation}: Props) {
   const [autoAnalyze, setAutoAnalyze] = useState(true);
   const [wifiOnly, setWifiOnly] = useState(true);
   const [pauseLowBattery, setPauseLowBattery] = useState(true);
+  const [storage, setStorage] = useState<{count: number; bytes: number} | null>(null);
+  const [clearingDownloads, setClearingDownloads] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -62,11 +72,37 @@ export default function SettingsScreen({navigation}: Props) {
       void isAnalyzePauseLowBattery().then(v => {
         if (!cancelled) setPauseLowBattery(v);
       });
+      void getStorageInfo().then(v => {
+        if (!cancelled) setStorage(v);
+      });
       return () => {
         cancelled = true;
       };
     }, []),
   );
+
+  const onClearDownloads = () => {
+    Alert.alert(
+      'Remove all downloads?',
+      'This deletes every offline audio file. Those songs will stream again next time.',
+      [
+        {text: 'Cancel', style: 'cancel'},
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            setClearingDownloads(true);
+            try {
+              await removeAllDownloads();
+              setStorage(await getStorageInfo());
+            } finally {
+              setClearingDownloads(false);
+            }
+          },
+        },
+      ],
+    );
+  };
 
   const onToggleAutoAnalyze = (v: boolean) => {
     setAutoAnalyze(v); // optimistic
@@ -360,6 +396,28 @@ export default function SettingsScreen({navigation}: Props) {
             trackColor={{true: colors.accent, false: colors.surfaceRaised}}
           />
         </View>
+      </View>
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Offline downloads</Text>
+        <Text style={styles.sectionBody}>
+          {storage == null
+            ? 'Checking…'
+            : storage.count === 0
+              ? 'No downloads yet. Use “Download for offline” on a playlist.'
+              : `${storage.count} song${storage.count === 1 ? '' : 's'} · ${formatBytes(storage.bytes)} on device`}
+        </Text>
+        {storage != null && storage.count > 0 ? (
+          <Pressable
+            style={[styles.button, styles.buttonSecondary, clearingDownloads && styles.buttonDisabled]}
+            disabled={clearingDownloads}
+            onPress={onClearDownloads}>
+            {clearingDownloads ? (
+              <ActivityIndicator color={colors.textPrimary} />
+            ) : (
+              <Text style={styles.buttonSecondaryText}>Remove all downloads</Text>
+            )}
+          </Pressable>
+        ) : null}
       </View>
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>YouTube Music account</Text>

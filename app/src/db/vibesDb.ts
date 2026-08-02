@@ -54,6 +54,14 @@ function createSchemaIfMissing(db: DB): void {
     danceable REAL, acoustic REAL, party REAL,
     bpm REAL, energy REAL, key TEXT
   )`);
+  // Offline downloads: device-LOCAL only (paths are meaningless on another
+  // device), so deliberately NOT part of the import/merge in mergeFromFile.
+  db.executeSync(`CREATE TABLE IF NOT EXISTS downloads (
+    video_id TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  )`);
   const res = db.executeSync(`SELECT value FROM meta WHERE key = 'schema_version'`);
   if (!res.rows.length) {
     db.executeSync(`INSERT INTO meta (key, value) VALUES ('schema_version', ?)`, [
@@ -77,7 +85,8 @@ export const MOOD_KEYS = [
 ] as const;
 
 const SONG_COLS = `s.video_id, s.title, s.artist, s.duration_s,
-  EXISTS(SELECT 1 FROM features f WHERE f.video_id = s.video_id) AS has_vibe`;
+  EXISTS(SELECT 1 FROM features f WHERE f.video_id = s.video_id) AS has_vibe,
+  EXISTS(SELECT 1 FROM downloads d WHERE d.video_id = s.video_id) AS has_download`;
 
 // Analyzed-only join: features.video_id is only present once the analyzer
 // has processed a song, so an INNER JOIN here is exactly the "analyzed"
@@ -93,6 +102,7 @@ function rowToSong(r: any): Song {
     artist: r.artist,
     durationS: r.duration_s ?? null,
     hasVibe: !!r.has_vibe,
+    hasDownload: !!r.has_download,
   };
 }
 
@@ -212,6 +222,47 @@ export class VibesDb {
             [playlistId, limit],
           );
     return res.rows.map((r: any) => r.video_id);
+  }
+
+  // --- offline downloads -------------------------------------------------
+
+  /** Local file path for an offline-downloaded song, or null if not saved. */
+  getDownloadPath(videoId: string): string | null {
+    const res = this.db.executeSync(`SELECT path FROM downloads WHERE video_id = ?`, [videoId]);
+    return res.rows.length ? (res.rows[0] as any).path : null;
+  }
+
+  /** All downloaded video ids (for batch dedup / "download all" skip checks). */
+  getDownloadedIds(): Set<string> {
+    const res = this.db.executeSync(`SELECT video_id FROM downloads`);
+    return new Set(res.rows.map((r: any) => r.video_id));
+  }
+
+  /** Every download row -- used by Settings storage view and cleanup. */
+  getDownloads(): Array<{videoId: string; path: string; bytes: number}> {
+    const res = this.db.executeSync(`SELECT video_id, path, bytes FROM downloads`);
+    return res.rows.map((r: any) => ({videoId: r.video_id, path: r.path, bytes: r.bytes}));
+  }
+
+  /** Total bytes across all downloaded files. */
+  getDownloadsTotalBytes(): number {
+    const res = this.db.executeSync(`SELECT COALESCE(SUM(bytes), 0) AS total FROM downloads`);
+    return (res.rows[0] as any).total ?? 0;
+  }
+
+  addDownload(videoId: string, path: string, bytes: number, createdAt: number): void {
+    this.db.executeSync(
+      `INSERT OR REPLACE INTO downloads (video_id, path, bytes, created_at) VALUES (?, ?, ?, ?)`,
+      [videoId, path, bytes, createdAt],
+    );
+  }
+
+  removeDownload(videoId: string): void {
+    this.db.executeSync(`DELETE FROM downloads WHERE video_id = ?`, [videoId]);
+  }
+
+  clearDownloads(): void {
+    this.db.executeSync(`DELETE FROM downloads`);
   }
 
   // Plan D Task 6: on-device analyzer writer path. `hasFeatures` is the
