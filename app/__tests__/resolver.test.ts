@@ -4,13 +4,27 @@ const f = (bitrate: number, hasVideo = false) => ({
   mimeType: 'audio/mp4', bitrate, hasAudio: true, hasVideo,
 });
 
-test('picks highest-bitrate audio-only format', () => {
+test('picks highest-bitrate audio-only format (ignoring muxed) by default', () => {
   const best = pickAudioFormat([f(128000), f(256000), f(999999, true)]);
   expect(best.bitrate).toBe(256000);
 });
 
-test('throws when no audio-only format exists', () => {
-  expect(() => pickAudioFormat([f(128000, true)])).toThrow();
+test("'lowest' picks the smallest audio-only format", () => {
+  const lo = pickAudioFormat([f(128000), f(256000), f(64000)], 'lowest');
+  expect(lo.bitrate).toBe(64000);
+});
+
+test('falls back to a muxed (video+audio) format when no audio-only exists', () => {
+  // Only muxed formats present -> must NOT throw; pick from the muxed pool.
+  const hi = pickAudioFormat([f(500000, true), f(900000, true)]);
+  expect(hi.bitrate).toBe(900000);
+  const lo = pickAudioFormat([f(500000, true), f(900000, true)], 'lowest');
+  expect(lo.bitrate).toBe(500000);
+});
+
+test('throws only when NO format has an audio track', () => {
+  const videoOnly = {mimeType: 'video/mp4', bitrate: 100, hasAudio: false, hasVideo: true};
+  expect(() => pickAudioFormat([videoOnly])).toThrow();
 });
 
 test('StreamResolveError supports cause option', () => {

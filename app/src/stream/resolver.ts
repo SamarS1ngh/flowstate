@@ -23,18 +23,27 @@ export function pickAudioFormat<T extends AudioFormatLike>(
   formats: T[],
   quality: 'highest' | 'lowest' = 'highest',
 ): T {
-  const audio = formats
-    .filter(x => x.hasAudio && !x.hasVideo)
-    .sort((a, b) => b.bitrate - a.bitrate);
-  if (!audio.length) {
-    throw new StreamResolveError('no audio-only format available');
+  // Prefer audio-only (smallest download / cleanest). But some tracks come
+  // back from the TV streaming client with NO audio-only adaptive format --
+  // only muxed (video+audio) or video-only. Those are still perfectly
+  // playable/analyzable: TrackPlayer plays a muxed URL, and the analyzer's
+  // MediaExtractor selects the audio track out of the muxed container. So
+  // fall back to any format that HAS audio (i.e. muxed) rather than failing
+  // the whole song -- this recovers a large chunk of "no audio-only format
+  // available" failures that were real, available music.
+  const audioOnly = formats.filter(x => x.hasAudio && !x.hasVideo);
+  const pool = (audioOnly.length ? audioOnly : formats.filter(x => x.hasAudio)).sort(
+    (a, b) => b.bitrate - a.bitrate,
+  );
+  if (!pool.length) {
+    throw new StreamResolveError('no format with an audio track available');
   }
   // Playback wants the best-sounding stream (highest). Analysis downsamples
   // to 16kHz mono regardless, so bitrate is irrelevant to the fingerprint --
   // it wants the SMALLEST file to download fastest (googlevideo throttles a
   // full-file GET to ~playback speed, so a high-bitrate stream can blow past
-  // the download timeout on a slow link). 'lowest' picks the smallest audio.
-  return quality === 'lowest' ? audio[audio.length - 1] : audio[0];
+  // the download timeout on a slow link). 'lowest' picks the smallest.
+  return quality === 'lowest' ? pool[pool.length - 1] : pool[0];
 }
 
 // Root-cause note (post-login playback regression): this resolver has
@@ -180,7 +189,16 @@ export async function resolveStreamUrl(
     const headers = CLIENT_HEADERS[client];
     try {
       const info = await tube.getBasicInfo(videoId, {client});
-      const rawFormats = info.streaming_data?.adaptive_formats ?? [];
+      // BOTH format lists: `adaptive_formats` = separate audio-only/video-only
+      // streams; `formats` = legacy MUXED (video+audio) streams. Some tracks
+      // (esp. via the TV client) expose NO audio-only adaptive format but DO
+      // have a muxed one -- if we only look at adaptive_formats we wrongly fail
+      // real, available music with "no audio track". Include both so
+      // pickAudioFormat's muxed fallback actually has muxed to fall back to.
+      const rawFormats = [
+        ...(info.streaming_data?.adaptive_formats ?? []),
+        ...(info.streaming_data?.formats ?? []),
+      ];
       // youtubei.js's Format class exposes snake_case fields (mime_type,
       // has_audio, has_video) rather than the camelCase AudioFormatLike
       // contract used here, so adapt each raw format into that shape while
