@@ -130,7 +130,10 @@ export class VibeQueue implements QueueSource {
     return this.seed;
   }
 
-  private attemptWeightedPick(center: VibeSong, threshold: number): VibeSong | null {
+  private weightedCandidates(
+    center: VibeSong,
+    threshold: number,
+  ): Array<{item: VibeSong; weight: number}> {
     // The center itself is excluded structurally by buildPool (it skips
     // candidate.videoId === center.videoId), so the ban set only needs the
     // session-rejected ids.
@@ -139,7 +142,7 @@ export class VibeQueue implements QueueSource {
       moodFilter: this.moodFilter ?? undefined,
       banned: this.sessionBans,
     });
-    if (pool.length === 0) return null;
+    if (pool.length === 0) return [];
 
     const simTo = (a: string, b: string): number => {
       const songA = this.byId.get(a);
@@ -148,7 +151,7 @@ export class VibeQueue implements QueueSource {
       return cosine(songA.embedding, songB.embedding);
     };
 
-    const weighted = pool.map(({song, sim}) => ({
+    return pool.map(({song, sim}) => ({
       item: song,
       weight: composeWeight(
         sim,
@@ -156,8 +159,30 @@ export class VibeQueue implements QueueSource {
         feedbackBias(center.videoId, song.videoId, this.feedback, simTo),
       ),
     }));
+  }
 
+  private attemptWeightedPick(center: VibeSong, threshold: number): VibeSong | null {
+    const weighted = this.weightedCandidates(center, threshold);
+    if (weighted.length === 0) return null;
     return samplePick(weighted, this.rng);
+  }
+
+  // Best-effort, NON-mutating guess at the likely next song for the controller's
+  // stream-prefetch cache only (see QueueSource.peekNext). next() samples
+  // weighted-random, so the actual next may differ -- here we return the single
+  // highest-weight candidate (the most probable pick) without touching history,
+  // rng, or fallback callbacks. A wrong guess just misses the prefetch cache.
+  peekNext(): Song | null {
+    const center = this.resolveCenter(null);
+    const primaryThreshold = this.mode === 'lock' ? LOCK_THRESHOLD : DRIFT_THRESHOLD;
+    let weighted = this.weightedCandidates(center, primaryThreshold);
+    if (weighted.length === 0) {
+      weighted = this.weightedCandidates(center, primaryThreshold - RELAX_DELTA);
+    }
+    if (weighted.length === 0) return null;
+    let best = weighted[0];
+    for (const w of weighted) if (w.weight > best.weight) best = w;
+    return best.item.song;
   }
 
   private randomFallback(center: VibeSong): VibeSong | null {

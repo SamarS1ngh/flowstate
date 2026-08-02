@@ -6,6 +6,46 @@ import {QueueSource} from './queue';
 let source: QueueSource | null = null;
 let current: Song | null = null;
 
+type Stream = {url: string; headers?: Record<string, string>};
+
+// Stream-URL prefetch cache (Task 3). resolveStreamUrl() is the slow part of a
+// skip (network round-trip, sometimes a search-fallback probe). After each
+// load we kick off resolution of the most-likely next song in the background
+// and stash the promise here, keyed by videoId; load() then awaits that instead
+// of resolving fresh, so a skip feels instant. Best-effort: a wrong guess (the
+// stochastic vibe next() picking a different song) or a failed prefetch just
+// falls through to a normal fresh resolve -- never worse than before.
+let prefetch: {videoId: string; promise: Promise<Stream | null>} | null = null;
+
+// Resolve the likely-next song's stream in the background. Errors are swallowed
+// into a null result so the cache entry is simply ignored on miss (and never
+// surfaces as an unhandled rejection).
+function schedulePrefetch(): void {
+  const nextSong = source?.peekNext?.() ?? null;
+  if (!nextSong) {
+    prefetch = null;
+    return;
+  }
+  if (prefetch?.videoId === nextSong.videoId) return; // already in flight
+  const meta = {title: nextSong.title, artist: nextSong.artist};
+  prefetch = {
+    videoId: nextSong.videoId,
+    promise: resolveStreamUrl(nextSong.videoId, meta).catch(() => null),
+  };
+}
+
+// Fresh resolve with the design's retry-once semantics. Pass title/artist so
+// the resolver's search-fallback can recover an unplayable "- Topic" videoId.
+async function resolveWithRetry(song: Song): Promise<Stream> {
+  const meta = {title: song.title, artist: song.artist};
+  try {
+    return await resolveStreamUrl(song.videoId, meta);
+  } catch (e) {
+    if (!(e instanceof StreamResolveError)) throw e;
+    return await resolveStreamUrl(song.videoId, meta); // second attempt
+  }
+}
+
 // Play history so "previous" walks back through the songs actually played --
 // works for both a normal queue and vibe shuffle (a generative forward walk
 // that has no inherent "previous"). Pushed on each forward skip; popped by
@@ -38,16 +78,15 @@ export function consumeFallbackStatus(): FallbackKind | null {
 }
 
 async function load(song: Song): Promise<void> {
-  // retry-once semantics per design: fresh extraction on first failure, then skip
-  // Pass title/artist so the resolver's search-fallback can find a playable
-  // alternate when the stored videoId is an unplayable "- Topic" art track.
-  const meta = {title: song.title, artist: song.artist};
-  let stream: {url: string; headers?: Record<string, string>};
-  try {
-    stream = await resolveStreamUrl(song.videoId, meta);
-  } catch (e) {
-    if (!(e instanceof StreamResolveError)) throw e;
-    stream = await resolveStreamUrl(song.videoId, meta); // second attempt
+  let stream: Stream | null = null;
+  // Use the prefetched stream if it's for this exact song. On a prefetch miss
+  // (wrong guess) or a failed prefetch (null), fall through to a fresh resolve.
+  if (prefetch && prefetch.videoId === song.videoId) {
+    stream = await prefetch.promise;
+    prefetch = null;
+  }
+  if (!stream) {
+    stream = await resolveWithRetry(song);
   }
   await TrackPlayer.reset();
   await TrackPlayer.add({
@@ -60,12 +99,16 @@ async function load(song: Song): Promise<void> {
   });
   await TrackPlayer.play();
   current = song;
+  // Warm the cache for the next skip. Non-blocking -- this song is already
+  // playing; the prefetch races in the background.
+  schedulePrefetch();
 }
 
 export async function playFrom(src: QueueSource, first: Song): Promise<void> {
   source = src;
   lastFallback = null; // starting a fresh session -- no stale status from the last one
   history.length = 0; // fresh session -> no previous
+  prefetch = null; // don't let a prior session's cached stream leak in
   src.reset(first);
   await load(first);
 }

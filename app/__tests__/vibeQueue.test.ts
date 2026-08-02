@@ -230,3 +230,32 @@ describe('VibeQueue: reset', () => {
     expect(() => q.reset({videoId: 'unknown', title: 'x', artist: 'y', durationS: null, hasVibe: false})).toThrow();
   });
 });
+
+describe('VibeQueue: peekNext (prefetch hint)', () => {
+  test('lock mode guesses an in-cluster candidate', () => {
+    const q = new VibeQueue(a1, 'lock', baseDeps());
+    const guess = q.peekNext();
+    expect(guess).not.toBeNull();
+    expect(['a2', 'a3']).toContain(guess!.videoId);
+  });
+
+  test('does NOT mutate queue state (history/rng untouched)', () => {
+    // Same rng + same first next() with and without a preceding peekNext must
+    // yield the same pick -- proving peek consumed no rng and pushed no history.
+    const withoutPeek = new VibeQueue(a1, 'lock', baseDeps({rng: makeRng(7)}));
+    const first = withoutPeek.next(null);
+
+    const withPeek = new VibeQueue(a1, 'lock', baseDeps({rng: makeRng(7)}));
+    withPeek.peekNext();
+    withPeek.peekNext();
+    const firstAfterPeek = withPeek.next(null);
+
+    expect(firstAfterPeek?.videoId).toBe(first?.videoId);
+  });
+
+  test('returns null when scope has no analyzable neighbors', () => {
+    // Seed alone in scope -> no candidates at any threshold.
+    const q = new VibeQueue(a1, 'lock', baseDeps({songs: [a1]}));
+    expect(q.peekNext()).toBeNull();
+  });
+});

@@ -35,3 +35,17 @@ describe('peekUpcoming', () => {
     expect(q.peekUpcoming(3)).toEqual([]);
   });
 });
+
+describe('peekNext', () => {
+  test('returns the immediate next song without mutating position', () => {
+    const q = new SimpleQueue([song('a'), song('b'), song('c')], 0);
+    expect(q.peekNext()?.videoId).toBe('b');
+    // next() still returns 'b' -> peekNext did not advance idx
+    expect(q.next(null)?.videoId).toBe('b');
+  });
+
+  test('returns null at the last song', () => {
+    const q = new SimpleQueue([song('a'), song('b')], 1);
+    expect(q.peekNext()).toBeNull();
+  });
+});

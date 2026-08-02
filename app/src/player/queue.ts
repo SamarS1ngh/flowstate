@@ -11,6 +11,14 @@ export interface QueueSource {
   // honest deterministic answer, so it simply doesn't implement this rather
   // than fabricate one. Callers must feature-detect with `?.`.
   peekUpcoming?(count: number): Song[];
+  // Optional, non-mutating best-effort guess at the single most-likely next
+  // song, used ONLY to warm the stream-URL prefetch cache (controller.ts) so a
+  // skip feels instant. Unlike peekUpcoming this is NOT shown to the user, so a
+  // stochastic source may return its most-probable candidate even though its
+  // real next() might pick differently -- a wrong guess just causes a harmless
+  // prefetch-cache miss (the skip resolves fresh, exactly as before). Deterministic
+  // sources (SimpleQueue) always guess right.
+  peekNext?(): Song | null;
 }
 
 export class SimpleQueue implements QueueSource {
@@ -35,5 +43,9 @@ export class SimpleQueue implements QueueSource {
   // just slice ahead of the current index -- no mutation of `idx`.
   peekUpcoming(count: number): Song[] {
     return this.songs.slice(this.idx + 1, this.idx + 1 + count);
+  }
+
+  peekNext(): Song | null {
+    return this.songs[this.idx + 1] ?? null;
   }
 }

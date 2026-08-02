@@ -116,6 +116,65 @@ describe('skipToNext: offline consecutive-failure cap', () => {
   });
 });
 
+describe('stream prefetch cache', () => {
+  const resolveMock = resolveStreamUrl as jest.Mock;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resolveMock.mockResolvedValue({url: 'https://example.com/s.mp3', headers: {}});
+  });
+
+  // Deterministic ordered source that also exposes peekNext (like SimpleQueue),
+  // so the controller can prefetch the upcoming song's stream.
+  class PeekSource implements QueueSource {
+    label = 'peek';
+    private i = 0;
+    constructor(private ids: string[]) {}
+    reset(_seed: Song): void {
+      this.i = 0;
+    }
+    next(_last: Song | null): Song | null {
+      this.i += 1;
+      return this.ids[this.i - 1] ? song(this.ids[this.i - 1]) : null;
+    }
+    peekNext(): Song | null {
+      return this.ids[this.i] ? song(this.ids[this.i]) : null;
+    }
+  }
+
+  function resolvedIds(): string[] {
+    return resolveMock.mock.calls.map(c => c[0]);
+  }
+
+  test('prefetches the next song and reuses it on skip (no second resolve)', async () => {
+    await playFrom(new PeekSource(['b', 'c']), song('a'));
+    // load(a) resolved 'a' fresh, then schedulePrefetch resolved 'b' ahead.
+    expect(resolvedIds()).toEqual(['a', 'b']);
+
+    await skipToNext(); // -> b, should consume the cached 'b' stream
+    // 'b' is NOT resolved a second time; only the new prefetch of 'c' is added.
+    expect(resolvedIds()).toEqual(['a', 'b', 'c']);
+    expect(resolvedIds().filter(id => id === 'b')).toHaveLength(1);
+  });
+
+  test('a failed prefetch falls through to a fresh resolve on skip', async () => {
+    resolveMock.mockImplementation((id: string) => {
+      // The prefetch of 'b' (fired during load of 'a') fails; every other
+      // resolve succeeds.
+      if (id === 'b' && resolveMock.mock.calls.filter(c => c[0] === 'b').length === 1) {
+        return Promise.reject(new Error('prefetch flopped'));
+      }
+      return Promise.resolve({url: 'https://example.com/s.mp3', headers: {}});
+    });
+
+    await playFrom(new PeekSource(['b', 'c']), song('a'));
+    // Skip must still succeed by resolving 'b' fresh (prefetch returned null).
+    await skipToNext();
+    expect(resolvedIds().filter(id => id === 'b').length).toBeGreaterThanOrEqual(2);
+    expect(TrackPlayer.stop).not.toHaveBeenCalled();
+  });
+});
+
 describe('skipToPrevious: history-backed previous song', () => {
   const resolveMock = resolveStreamUrl as jest.Mock;
   const addMock = TrackPlayer.add as jest.Mock;
