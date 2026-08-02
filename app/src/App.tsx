@@ -109,7 +109,18 @@ export default function App() {
       try {
         await requestNotificationPermission();
         try {
-          await TrackPlayer.setupPlayer();
+          // Buffer tuning for fast audio start. Defaults (playBuffer 2.5s,
+          // minBuffer 50s) make ExoPlayer wait to buffer 2.5s of a
+          // googlevideo-throttled (~1x realtime) stream before ANY sound plays
+          // -- felt as seconds of silence after tap/skip. playBuffer 0.75s
+          // starts sound as soon as a little is buffered; minBuffer 15s still
+          // keeps a healthy ongoing buffer so playback doesn't stutter.
+          await TrackPlayer.setupPlayer({
+            minBuffer: 15,
+            maxBuffer: 50,
+            playBuffer: 0.75,
+            backBuffer: 0,
+          });
         } catch (e) {
           if (!isPlayerAlreadyInitializedError(e)) throw e;
           // Player is already up from a previous mount of this process --
