@@ -22,7 +22,8 @@ along the way.
 3. [Does it learn / evolve?](#3-does-it-learn--evolve)
 4. [The biggest errors we fought through](#4-the-biggest-errors-we-fought-through)
 5. [The parity gap we caught after release (resampling)](#5-the-parity-gap-we-caught-after-release-resampling)
-6. [Where it landed + the one lesson](#6-where-it-landed--the-one-lesson)
+6. [The reliability & polish pass (v0.4.0)](#6-the-reliability--polish-pass-v040)
+7. [Where it landed + the one lesson](#7-where-it-landed--the-one-lesson)
 
 ---
 
@@ -416,9 +417,76 @@ added to the app so this can't silently regress. Cost: the proper shrink is a bi
 elimination → find the exact recipe that matches → write it in → re-verify on the real
 device.* Same shape as every other bug in this project.
 
-## 6. Where it landed + the one lesson
+## 6. The reliability & polish pass (v0.4.0)
 
-`v0.3.0-alpha` — on-device analysis, no PC required.
+Once on-device analysis worked, the next round was about making the app *reliable
+and pleasant to live with* rather than just functional. Six changes:
+
+### a) Offline downloads
+
+You can now **download a playlist for offline** (PlaylistScreen → "Download for
+offline (N)"). Full-quality audio is saved to the app's private storage and
+tracked in a new `downloads` table (`video_id → path, bytes, created_at`).
+
+- **Offline-first playback:** `controller.load()` checks for a local file *before*
+  touching the network — a downloaded song plays straight from disk, instantly,
+  even with no connection.
+- **Self-healing:** if a file is deleted out from under the app, the lookup notices
+  the missing file, drops the stale row, and falls back to streaming.
+- **Device-local by design:** download rows are deliberately excluded from the
+  analysis-data import/merge — a file path from one phone is meaningless on another.
+- Manage it in **Settings → Offline downloads** (how many songs, how much space, and
+  "Remove all downloads"). Downloads respect the same Wi-Fi-only guard as analysis.
+
+### b) Charging / low-battery guard
+
+Analysis is CPU-heavy. A new native battery bridge lets the analyzer **pause below
+20 % when unplugged** and auto-resume once you're charging or back above 25 %
+(hysteresis so it doesn't flap at the threshold). Charging always allows analysis.
+Toggle: **Settings → Pause on low battery**. Same pause/resume plumbing as the
+Wi-Fi guard, just triggered by battery instead of network.
+
+### c) Instant skips (stream prefetch)
+
+The slow part of skipping a track is resolving its stream URL (a network round-trip,
+sometimes a search-fallback probe). Now, as soon as a song starts, the app
+**prefetches the likely-next song's stream in the background**, so a skip reuses the
+cached result and feels instant. Ordered playlists always guess right; vibe shuffle
+(which picks weighted-random) makes a best-effort guess — a wrong guess is just a
+harmless cache miss. If the next song is downloaded, prefetch skips the network
+entirely.
+
+### d) Loading skeletons
+
+The Library and Playlist screens now show **pulsing, row-shaped placeholders** while
+loading instead of a bare spinner — the screen reads as "content is coming" with the
+right shape already in place.
+
+### e) Smaller, shrunk release
+
+The release build now runs **R8 code shrinking + resource shrinking** (on top of the
+earlier arm64-only native-lib filter and Hermes), with conservative keep-rules for
+the JS↔native bridge so nothing gets stripped by mistake.
+
+### f) What we deliberately *didn't* do (and why)
+
+- **Incremental library sync** — there's no cheap "what changed" signal from the
+  YouTube TV surface, and a full sync is already fast; a fake-incremental would add
+  complexity without real benefit.
+- **A raw vibe-similarity threshold slider** — users don't think in cosine distances,
+  and the existing **Lock / Drift** vibe-mode chips already cover "tight vs loose"
+  in language people actually understand. A raw knob would be a confusing non-feature.
+
+Skipping these on purpose — and saying so — is part of the same honesty rule the rest
+of this doc runs on.
+
+---
+
+## 7. Where it landed + the one lesson
+
+`v0.4.0-alpha` — on-device analysis (no PC required), plus offline downloads,
+battery-aware analysis, instant skips, and a shrunk release. (`v0.3.0-alpha` was the
+on-device-analysis milestone.)
 
 - ~30 s/song; vibe shuffle unlocks at 10 analyzed songs; each song is analyzed once,
   then cached forever.
