@@ -311,6 +311,9 @@ export interface BatchState {
   /** True when the batch stopped because Wi-Fi-only is on but we're on
    * cellular -- it auto-resumes when Wi-Fi returns (see pendingResume). */
   pausedForNetwork: boolean;
+  /** True after cancel is requested but before the in-flight song finishes and
+   * the loop exits -- lets the UI show "Stopping…" instead of a stale count. */
+  cancelling: boolean;
 }
 
 const IDLE: BatchState = {
@@ -321,6 +324,7 @@ const IDLE: BatchState = {
   ok: 0,
   failed: [],
   pausedForNetwork: false,
+  cancelling: false,
 };
 
 let batchState: BatchState = IDLE;
@@ -361,6 +365,10 @@ export function subscribeAnalysisBatch(cb: (s: BatchState) => void): () => void 
 export function cancelAnalysisBatch(): void {
   batchCancelled = true;
   pendingResume = null; // an explicit cancel shouldn't auto-resume later
+  if (batchState.running) {
+    batchState = {...batchState, cancelling: true}; // UI shows "Stopping…" now
+    emitBatch();
+  }
   signalBatch(); // wake a parked producer/consumer so the loop can exit now
 }
 
@@ -382,6 +390,7 @@ export function startAnalysisBatch(videoIds: string[], playlistId: string | null
     ok: 0,
     failed: [],
     pausedForNetwork: false,
+    cancelling: false,
   };
   emitBatch();
 
@@ -515,7 +524,7 @@ async function batchLoop(videoIds: string[], playlistId: string | null): Promise
   // Clean up any downloaded-but-unconsumed files (cancel / pause path).
   for (const {tempPath} of ready) await RNFS.unlink(tempPath).catch(() => {});
 
-  batchState = {...batchState, running: false, pausedForNetwork: pausedForNet};
+  batchState = {...batchState, running: false, pausedForNetwork: pausedForNet, cancelling: false};
   emitBatch();
 }
 

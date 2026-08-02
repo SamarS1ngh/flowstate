@@ -6,6 +6,13 @@ import {QueueSource} from './queue';
 let source: QueueSource | null = null;
 let current: Song | null = null;
 
+// Play history so "previous" walks back through the songs actually played --
+// works for both a normal queue and vibe shuffle (a generative forward walk
+// that has no inherent "previous"). Pushed on each forward skip; popped by
+// skipToPrevious. Bounded so it can't grow without limit in a long session.
+const history: Song[] = [];
+const MAX_HISTORY = 50;
+
 // Fallback-status seam: VibeQueue's onFallback callback (wired up by whoever
 // constructs the VibeQueue, e.g. PlaylistScreen -- see reportFallback) fires
 // synchronously inside QueueSource.next(). skipToNext() is the only place
@@ -55,6 +62,7 @@ async function load(song: Song): Promise<void> {
 export async function playFrom(src: QueueSource, first: Song): Promise<void> {
   source = src;
   lastFallback = null; // starting a fresh session -- no stale status from the last one
+  history.length = 0; // fresh session -> no previous
   src.reset(first);
   await load(first);
 }
@@ -72,11 +80,16 @@ const MAX_CONSECUTIVE_LOAD_FAILURES = 5;
 export async function skipToNext(): Promise<void> {
   if (!source) return;
   lastFallback = null;
+  const leaving = current; // song we're moving away from -> goes onto history
   let candidate = source.next(current);
   let consecutiveFailures = 0;
   while (candidate) {
     try {
       await load(candidate);
+      if (leaving) {
+        history.push(leaving);
+        if (history.length > MAX_HISTORY) history.shift();
+      }
       return;
     } catch {
       lastFallback = null;
@@ -95,7 +108,27 @@ export async function skipToNext(): Promise<void> {
 }
 
 export async function skipToPrevious(): Promise<void> {
-  await TrackPlayer.seekTo(0); // v1: previous restarts current track
+  // If we're a few seconds into the track, "previous" restarts it (like most
+  // players); only jump to the actual previous song near the start.
+  try {
+    const pos = await TrackPlayer.getProgress();
+    if (pos.position > 3) {
+      await TrackPlayer.seekTo(0);
+      return;
+    }
+  } catch {
+    // ignore -- fall through to history behavior
+  }
+  const prev = history.pop();
+  if (!prev) {
+    await TrackPlayer.seekTo(0); // no history (session start) -> restart current
+    return;
+  }
+  try {
+    await load(prev); // load sets current=prev; do NOT push it onto history
+  } catch {
+    await TrackPlayer.seekTo(0); // previous song unplayable -> restart current
+  }
 }
 
 export function nowPlaying(): Song | null {

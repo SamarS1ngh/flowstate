@@ -294,23 +294,33 @@ export default function PlaylistScreen({route, navigation}: Props) {
                 <View style={styles.analyzeRow}>
                   <ActivityIndicator color={colors.accent} size="small" />
                   <Text style={styles.analyzeText}>
-                    Analyzing {myBatch!.done}/{myBatch!.total}
-                    {myBatch!.failed.length > 0 ? ` · ${myBatch!.failed.length} failed` : ''}…
+                    {myBatch!.cancelling
+                      ? 'Stopping…'
+                      : `Analyzing ${myBatch!.done}/${myBatch!.total}${
+                          myBatch!.failed.length > 0 ? ` · ${myBatch!.failed.length} failed` : ''
+                        }…`}
                   </Text>
-                  <Pressable onPress={onCancelAnalyze} hitSlop={8}>
-                    <Text style={styles.cancelText}>Cancel</Text>
-                  </Pressable>
+                  {!myBatch!.cancelling ? (
+                    <Pressable onPress={onCancelAnalyze} hitSlop={8}>
+                      <Text style={styles.cancelText}>Cancel</Text>
+                    </Pressable>
+                  ) : null}
                 </View>
               ) : libraryBatch ? (
                 <View style={styles.analyzeRow}>
                   <ActivityIndicator color={colors.accent} size="small" />
                   <Text style={styles.analyzeText}>
-                    Analyzing library {libraryBatch.done}/{libraryBatch.total}
-                    {libraryBatch.failed.length > 0 ? ` · ${libraryBatch.failed.length} failed` : ''}…
+                    {libraryBatch.cancelling
+                      ? 'Stopping…'
+                      : `Analyzing library ${libraryBatch.done}/${libraryBatch.total}${
+                          libraryBatch.failed.length > 0 ? ` · ${libraryBatch.failed.length} failed` : ''
+                        }…`}
                   </Text>
-                  <Pressable onPress={onCancelAnalyze} hitSlop={8}>
-                    <Text style={styles.cancelText}>Cancel</Text>
-                  </Pressable>
+                  {!libraryBatch.cancelling ? (
+                    <Pressable onPress={onCancelAnalyze} hitSlop={8}>
+                      <Text style={styles.cancelText}>Cancel</Text>
+                    </Pressable>
+                  ) : null}
                 </View>
               ) : otherBusy ? (
                 <View style={styles.analyzeRow}>

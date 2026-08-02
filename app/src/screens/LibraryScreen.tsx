@@ -311,8 +311,11 @@ export default function LibraryScreen({navigation}: Props) {
       ) : autoBatch ? (
         <View style={styles.statusBanner}>
           <Text style={styles.statusBannerText}>
-            Analyzing your library in the background · {autoBatch.done}/{autoBatch.total}
-            {autoBatch.failed.length > 0 ? ` · ${autoBatch.failed.length} failed` : ''}
+            {autoBatch.cancelling
+              ? 'Stopping…'
+              : `Analyzing your library in the background · ${autoBatch.done}/${autoBatch.total}${
+                  autoBatch.failed.length > 0 ? ` · ${autoBatch.failed.length} failed` : ''
+                }`}
           </Text>
         </View>
       ) : batch?.pausedForNetwork ? (
