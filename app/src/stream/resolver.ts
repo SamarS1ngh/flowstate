@@ -89,17 +89,25 @@ export function anonymousFetch(input: RequestInfo | URL, init?: RequestInit): Pr
 
 let yt: Innertube | null = null;
 async function innertube(): Promise<Innertube> {
-  if (!yt) yt = await Innertube.create({retrieve_player: true, fetch: anonymousFetch});
+  // retrieve_player:false is a ~6x bootstrap speedup (measured 5272ms -> 884ms
+  // on-device). Innertube.create({retrieve_player:true}) downloads and parses
+  // YouTube's ~2MB player JS (signature deciphering) on session bootstrap --
+  // and that cost otherwise lands on the FIRST play, making the first song (or
+  // vibe shuffle) take ~6s. But the mobile clients we resolve with (ANDROID_VR,
+  // IOS -- see CLIENTS) return pre-deciphered progressive URLs that need no
+  // player at all, so we skip it. A format that DID need deciphering would just
+  // fail this client and fall through to the next client / the search fallback
+  // (which probes the same mobile clients), so reliability is preserved while
+  // the common path gets dramatically faster.
+  if (!yt) yt = await Innertube.create({retrieve_player: false, fetch: anonymousFetch});
   return yt;
 }
 
-// Innertube.create({retrieve_player: true}) downloads and parses YouTube's
-// player JS (signature/deciphering) -- a ~5-6s cold boot that otherwise lands
-// on the FIRST stream resolve, i.e. the moment the user hits play, so the first
-// song takes seconds longer than every song after it. Kick it off once at app
-// startup (fire-and-forget) so the session is already warm by the time anything
-// plays. Idempotent: the innertube() singleton means later resolves reuse it,
-// and a failed prewarm just leaves yt null for the real call to retry.
+// Even with retrieve_player:false the session bootstrap still does a round-trip
+// (~900ms measured) that otherwise lands on the first stream resolve. Kick it
+// off once at app startup (fire-and-forget) so the session is already warm by
+// the time anything plays. Idempotent: the innertube() singleton means later
+// resolves reuse it, and a failed prewarm just leaves yt null to retry.
 let prewarmStarted = false;
 export function prewarmResolver(): void {
   if (prewarmStarted) return;
