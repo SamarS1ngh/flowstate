@@ -330,6 +330,12 @@ export default function LibraryScreen({navigation}: Props) {
             Analysis paused — waiting for Wi-Fi (change in Settings)
           </Text>
         </View>
+      ) : batch?.pausedForBattery ? (
+        <View style={styles.statusBanner}>
+          <Text style={styles.statusBannerText}>
+            Analysis paused — low battery, plug in to resume (change in Settings)
+          </Text>
+        </View>
       ) : null}
       {filter === 'playlists' ? (
         <PlaylistList

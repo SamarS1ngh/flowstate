@@ -15,7 +15,7 @@
 // on-play, batch playlist analysis) far more often than it runs from a
 // button a user is staring at, so silent-log-and-continue is the right
 // default.
-import {AppState, NativeModules} from 'react-native';
+import {AppState, NativeEventEmitter, NativeModules} from 'react-native';
 import NetInfo from '@react-native-community/netinfo';
 import * as RNFS from '@dr.pogodin/react-native-fs';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -36,6 +36,8 @@ interface AnalysisServiceLike {
   start(title: string, text: string): void;
   update(title: string, text: string): void;
   stop(): void;
+  getBatteryStatus?(): Promise<{level: number; charging: boolean}>;
+  startBatteryUpdates?(): void;
 }
 const analysisService: AnalysisServiceLike | null =
   (NativeModules.AnalysisService as AnalysisServiceLike | undefined) ?? null;
@@ -327,6 +329,9 @@ export interface BatchState {
   /** True when the batch stopped because Wi-Fi-only is on but we're on
    * cellular -- it auto-resumes when Wi-Fi returns (see pendingResume). */
   pausedForNetwork: boolean;
+  /** True when the batch stopped because the phone is low and unplugged (and
+   * "pause on low battery" is on) -- auto-resumes when charging or recovered. */
+  pausedForBattery: boolean;
   /** True after cancel is requested but before the in-flight song finishes and
    * the loop exits -- lets the UI show "Stopping…" instead of a stale count. */
   cancelling: boolean;
@@ -340,6 +345,7 @@ const IDLE: BatchState = {
   ok: 0,
   failed: [],
   pausedForNetwork: false,
+  pausedForBattery: false,
   cancelling: false,
 };
 
@@ -406,6 +412,7 @@ export function startAnalysisBatch(videoIds: string[], playlistId: string | null
     ok: 0,
     failed: [],
     pausedForNetwork: false,
+    pausedForBattery: false,
     cancelling: false,
   };
   emitBatch();
@@ -481,15 +488,17 @@ async function batchLoop(videoIds: string[], playlistId: string | null): Promise
   const ready: Array<{videoId: string; tempPath: string}> = [];
   let producerDone = false;
   let pausedForNet = false;
+  let pausedForBat = false;
   const changed = () => new Promise<void>(r => batchWaiters.push(r));
 
   const producer = (async () => {
     for (let i = 0; i < videoIds.length; i++) {
       if (batchCancelled) break;
-      if (!allowedNetworkNow()) {
+      if (!allowedNetworkNow() || !batteryOkNow()) {
         // Pause: hand the not-yet-downloaded remainder to the resume listener.
         pendingResume = {ids: videoIds.slice(i), playlistId};
-        pausedForNet = true;
+        pausedForNet = !allowedNetworkNow();
+        pausedForBat = !batteryOkNow();
         break;
       }
       const videoId = videoIds[i];
@@ -540,7 +549,13 @@ async function batchLoop(videoIds: string[], playlistId: string | null): Promise
   // Clean up any downloaded-but-unconsumed files (cancel / pause path).
   for (const {tempPath} of ready) await RNFS.unlink(tempPath).catch(() => {});
 
-  batchState = {...batchState, running: false, pausedForNetwork: pausedForNet, cancelling: false};
+  batchState = {
+    ...batchState,
+    running: false,
+    pausedForNetwork: pausedForNet,
+    pausedForBattery: pausedForBat,
+    cancelling: false,
+  };
   emitBatch();
 }
 
@@ -576,6 +591,7 @@ function maybeResume(): void {
   if (batchState.running) return;
   if (!autoAnalyzeEnabled && batchState.playlistId === null) return;
   if (!allowedNetworkNow()) return;
+  if (!batteryOkNow()) return;
   if (AppState.currentState !== 'active') return; // never start FGS from bg
   const {ids, playlistId} = pendingResume;
   pendingResume = null;
@@ -595,6 +611,7 @@ function armNetListeners(): void {
   void NetInfo.fetch().then(state => {
     currentIsWifi = state.type === 'wifi' || state.type === 'ethernet';
   });
+  armBatteryListener();
 }
 
 export async function isAnalyzeWifiOnly(): Promise<boolean> {
@@ -618,6 +635,76 @@ export async function setAnalyzeWifiOnly(enabled: boolean): Promise<void> {
   }
 }
 
+// --- battery guard -----------------------------------------------------
+// Analysis is CPU-heavy (decode + repeated TFLite inference); running it on a
+// low, unplugged phone drains the battery the user needs. When "pause on low
+// battery" is on (default), a background batch pauses below PAUSE_BELOW and
+// auto-resumes once charging or recovered past RESUME_AT (hysteresis so it
+// doesn't flap around the threshold). Charging always allows analysis.
+
+const BATTERY_KEY = 'flowstate.analyzePauseLowBattery.v1';
+const PAUSE_BELOW = 0.2;
+const RESUME_AT = 0.25;
+let pauseLowBattery = true;
+// Optimistic until the first native read resolves -- assume plugged & full so
+// analysis is never wedged off before we know the real state.
+let currentBattery: {level: number; charging: boolean} = {level: 1, charging: true};
+// Hysteresis latch: once we drop below PAUSE_BELOW we stay "blocking" until we
+// climb back to RESUME_AT (or plug in), instead of toggling at a single point.
+let batteryBlocking = false;
+let batteryListenerArmed = false;
+
+function recomputeBatteryBlocking(): void {
+  if (currentBattery.charging) {
+    batteryBlocking = false;
+  } else if (currentBattery.level < PAUSE_BELOW) {
+    batteryBlocking = true;
+  } else if (currentBattery.level >= RESUME_AT) {
+    batteryBlocking = false;
+  }
+  // Between PAUSE_BELOW and RESUME_AT while discharging: keep prior state.
+}
+
+function batteryOkNow(): boolean {
+  return !pauseLowBattery || !batteryBlocking;
+}
+
+function armBatteryListener(): void {
+  if (batteryListenerArmed) return;
+  batteryListenerArmed = true;
+  const svc = analysisService;
+  if (!svc?.getBatteryStatus) return; // native module missing (e.g. tests)
+  void svc.getBatteryStatus().then(b => {
+    if (b) currentBattery = b;
+    recomputeBatteryBlocking();
+  });
+  svc.startBatteryUpdates?.();
+  const emitter = new NativeEventEmitter(NativeModules.AnalysisService);
+  emitter.addListener('flowstateBattery', (b: {level: number; charging: boolean}) => {
+    currentBattery = b;
+    const wasBlocking = batteryBlocking;
+    recomputeBatteryBlocking();
+    if (wasBlocking && !batteryBlocking) maybeResume(); // recovered/plugged in
+  });
+}
+
+export async function isAnalyzePauseLowBattery(): Promise<boolean> {
+  await ensureAutoPref();
+  return pauseLowBattery;
+}
+
+export async function setAnalyzePauseLowBattery(enabled: boolean): Promise<void> {
+  pauseLowBattery = enabled;
+  try {
+    await AsyncStorage.setItem(BATTERY_KEY, enabled ? '1' : '0');
+  } catch {
+    // best-effort
+  }
+  // Turned the guard off -> low battery no longer blocks; pick up any batch
+  // that was paused for battery.
+  if (!enabled) maybeResume();
+}
+
 // --- auto-analyze ------------------------------------------------------
 // Analysis should just HAPPEN once the library is synced -- no manual
 // "Analyze playlist" tap. The whole library is analyzed in the background
@@ -634,15 +721,18 @@ let autoStartedThisSession = false;
 async function ensureAutoPref(): Promise<void> {
   if (autoAnalyzePrefLoaded) return;
   try {
-    const [auto, wifi] = await Promise.all([
+    const [auto, wifi, battery] = await Promise.all([
       AsyncStorage.getItem(AUTO_ANALYZE_KEY),
       AsyncStorage.getItem(WIFI_ONLY_KEY),
+      AsyncStorage.getItem(BATTERY_KEY),
     ]);
     autoAnalyzeEnabled = auto == null ? true : auto === '1';
     analyzeWifiOnly = wifi == null ? true : wifi === '1';
+    pauseLowBattery = battery == null ? true : battery === '1';
   } catch {
     autoAnalyzeEnabled = true;
     analyzeWifiOnly = true;
+    pauseLowBattery = true;
   }
   autoAnalyzePrefLoaded = true;
   armNetListeners();
@@ -696,11 +786,16 @@ export async function autoStartAnalysis(unanalyzedVideoIds: string[]): Promise<v
   setTimeout(() => {
     if (batchState.running) return;
     if (AppState.currentState !== 'active') return;
-    if (!allowedNetworkNow()) {
-      // On cellular with Wi-Fi-only on: don't start now. Park the work so the
-      // network/appstate listener starts it once Wi-Fi is back.
+    if (!allowedNetworkNow() || !batteryOkNow()) {
+      // On cellular with Wi-Fi-only on, or low & unplugged: don't start now.
+      // Park the work so the network/battery/appstate listener starts it once
+      // the condition clears.
       pendingResume = {ids: unanalyzedVideoIds, playlistId: null};
-      batchState = {...IDLE, pausedForNetwork: true};
+      batchState = {
+        ...IDLE,
+        pausedForNetwork: !allowedNetworkNow(),
+        pausedForBattery: !batteryOkNow(),
+      };
       emitBatch();
       return;
     }

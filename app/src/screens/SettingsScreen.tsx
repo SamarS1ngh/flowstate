@@ -24,6 +24,8 @@ import {
   setAutoAnalyzeEnabled,
   isAnalyzeWifiOnly,
   setAnalyzeWifiOnly,
+  isAnalyzePauseLowBattery,
+  setAnalyzePauseLowBattery,
 } from '../analyze/analyzer';
 import {
   runMelFixtureParity,
@@ -46,6 +48,7 @@ export default function SettingsScreen({navigation}: Props) {
   const [realSongPathParityRunning, setRealSongPathParityRunning] = useState(false);
   const [autoAnalyze, setAutoAnalyze] = useState(true);
   const [wifiOnly, setWifiOnly] = useState(true);
+  const [pauseLowBattery, setPauseLowBattery] = useState(true);
 
   useFocusEffect(
     useCallback(() => {
@@ -55,6 +58,9 @@ export default function SettingsScreen({navigation}: Props) {
       });
       void isAnalyzeWifiOnly().then(v => {
         if (!cancelled) setWifiOnly(v);
+      });
+      void isAnalyzePauseLowBattery().then(v => {
+        if (!cancelled) setPauseLowBattery(v);
       });
       return () => {
         cancelled = true;
@@ -70,6 +76,11 @@ export default function SettingsScreen({navigation}: Props) {
   const onToggleWifiOnly = (v: boolean) => {
     setWifiOnly(v);
     void setAnalyzeWifiOnly(v);
+  };
+
+  const onTogglePauseLowBattery = (v: boolean) => {
+    setPauseLowBattery(v);
+    void setAnalyzePauseLowBattery(v);
   };
 
   useFocusEffect(
@@ -332,6 +343,20 @@ export default function SettingsScreen({navigation}: Props) {
           <Switch
             value={wifiOnly}
             onValueChange={onToggleWifiOnly}
+            trackColor={{true: colors.accent, false: colors.surfaceRaised}}
+          />
+        </View>
+        <View style={[styles.toggleRow, {marginTop: spacing.lg}]}>
+          <View style={styles.toggleTextCol}>
+            <Text style={styles.sectionTitle}>Pause on low battery</Text>
+            <Text style={styles.toggleDesc}>
+              Analysis is CPU-heavy. Keep this on to pause below 20% when unplugged
+              — it resumes automatically once charging or recharged.
+            </Text>
+          </View>
+          <Switch
+            value={pauseLowBattery}
+            onValueChange={onTogglePauseLowBattery}
             trackColor={{true: colors.accent, false: colors.surfaceRaised}}
           />
         </View>
