@@ -186,52 +186,65 @@ export async function resolveStreamUrl(
   }
   let lastErr: unknown;
   for (const client of CLIENTS) {
-    const headers = CLIENT_HEADERS[client];
     try {
-      const info = await tube.getBasicInfo(videoId, {client});
-      // BOTH format lists: `adaptive_formats` = separate audio-only/video-only
-      // streams; `formats` = legacy MUXED (video+audio) streams. Some tracks
-      // (esp. via the TV client) expose NO audio-only adaptive format but DO
-      // have a muxed one -- if we only look at adaptive_formats we wrongly fail
-      // real, available music with "no audio track". Include both so
-      // pickAudioFormat's muxed fallback actually has muxed to fall back to.
-      const rawFormats = [
-        ...(info.streaming_data?.adaptive_formats ?? []),
-        ...(info.streaming_data?.formats ?? []),
-      ];
-      // youtubei.js's Format class exposes snake_case fields (mime_type,
-      // has_audio, has_video) rather than the camelCase AudioFormatLike
-      // contract used here, so adapt each raw format into that shape while
-      // keeping a reference back to the original for deciphering.
-      const candidates = rawFormats.map(raw => ({
-        mimeType: raw.mime_type,
-        bitrate: raw.bitrate,
-        hasAudio: raw.has_audio,
-        hasVideo: raw.has_video,
-        raw,
-      }));
-      const picked = pickAudioFormat(candidates, quality);
-      // In this version, Format#decipher is async and accepts the session's
-      // Player (rather than being a sync method guarded by an `if` check as
-      // in older API sketches); it returns the plain `url` untouched when no
-      // signature cipher is present, so it's always safe to call.
-      const url = await picked.raw.decipher(tube.session.player);
-      if (typeof url !== 'string' || url.length === 0) {
-        throw new StreamResolveError('format had no URL after decipher');
-      }
-      if (!(await validateUrl(url, headers))) {
-        lastErr = new Error(`${client} stream URL failed resolve-time validation (non-2xx)`);
-        continue;
-      }
-      return {url, headers};
+      const got = await extractStream(tube, videoId, client, CLIENT_HEADERS[client], quality);
+      if (got) return got;
+      lastErr = new Error(`${client} stream URL failed resolve-time validation (non-2xx)`);
     } catch (e) {
       lastErr = e;
     }
   }
+
+  // (Tried an authed-session fallback here -- retrying via getAuthedInnertube()
+  // when anonymous clients yield no audio. It does NOT help: the device-code
+  // "TV" OAuth token 400s on the /youtubei/v1/player endpoint for these tracks
+  // -- the same INVALID_ARGUMENT limitation that blocks yt.music.* with this
+  // token -- and it only added latency/timeouts to each already-failing song.
+  // The remaining failures (a track with no anonymous audio format) are
+  // YouTube PoToken/SABR gating; recovering them needs a PoToken, not an authed
+  // retry, so it's deliberately NOT attempted here.)
+
   // Reset the cached singleton so the next call re-bootstraps fresh.
   yt = null;
   throw new StreamResolveError(
     `could not resolve stream for ${videoId}: ${String(lastErr)}`,
     {cause: lastErr},
   );
+}
+
+/**
+ * Pull a validated, playable stream out of one Innertube session/client, or
+ * return null if the URL exists but fails validation. Throws if no usable
+ * format/URL could be produced at all (so the caller can try the next client).
+ */
+async function extractStream(
+  tube: Innertube,
+  videoId: string,
+  client: (typeof CLIENTS)[number] | undefined,
+  headers: Record<string, string>,
+  quality: 'highest' | 'lowest',
+): Promise<ResolvedStream | null> {
+  const info = client
+    ? await tube.getBasicInfo(videoId, {client})
+    : await tube.getBasicInfo(videoId);
+  // BOTH format lists: adaptive_formats = separate audio-only/video-only;
+  // formats = legacy MUXED (video+audio). Include both so pickAudioFormat's
+  // muxed fallback has muxed to choose from.
+  const rawFormats = [
+    ...(info.streaming_data?.adaptive_formats ?? []),
+    ...(info.streaming_data?.formats ?? []),
+  ];
+  const candidates = rawFormats.map(raw => ({
+    mimeType: raw.mime_type,
+    bitrate: raw.bitrate,
+    hasAudio: raw.has_audio,
+    hasVideo: raw.has_video,
+    raw,
+  }));
+  const picked = pickAudioFormat(candidates, quality);
+  const url = await picked.raw.decipher(tube.session.player);
+  if (typeof url !== 'string' || url.length === 0) {
+    throw new StreamResolveError('format had no URL after decipher');
+  }
+  return (await validateUrl(url, headers)) ? {url, headers} : null;
 }
