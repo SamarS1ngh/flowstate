@@ -20,6 +20,7 @@ jest.mock('react-native-track-player', () => ({
     stop: jest.fn().mockResolvedValue(undefined),
     seekTo: jest.fn().mockResolvedValue(undefined),
     getPlaybackState: jest.fn().mockResolvedValue({state: 'none'}),
+    getProgress: jest.fn().mockResolvedValue({position: 0, duration: 200, buffered: 0}),
   },
   State: {Playing: 'playing', Paused: 'paused'},
   AppKilledPlaybackBehavior: {ContinuePlayback: 'continue-playback'},
@@ -37,7 +38,7 @@ jest.mock('../src/stream/resolver', () => {
 
 import TrackPlayer from 'react-native-track-player';
 import {resolveStreamUrl} from '../src/stream/resolver';
-import {playFrom, skipToNext, consumeFallbackStatus} from '../src/player/controller';
+import {playFrom, skipToNext, skipToPrevious, consumeFallbackStatus} from '../src/player/controller';
 
 function song(id: string): Song {
   return {videoId: id, title: id, artist: 'artist', durationS: 200, hasVibe: false};
@@ -112,5 +113,65 @@ describe('skipToNext: offline consecutive-failure cap', () => {
     expect(TrackPlayer.stop).not.toHaveBeenCalled();
     expect(TrackPlayer.play).toHaveBeenCalledTimes(1);
     expect(consumeFallbackStatus()).toBeNull();
+  });
+});
+
+describe('skipToPrevious: history-backed previous song', () => {
+  const resolveMock = resolveStreamUrl as jest.Mock;
+  const addMock = TrackPlayer.add as jest.Mock;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resolveMock.mockResolvedValue({url: 'https://example.com/s.mp3', headers: {}});
+    (TrackPlayer.getProgress as jest.Mock).mockResolvedValue({position: 0, duration: 200, buffered: 0});
+  });
+
+  // A simple ordered source so skipToNext produces deterministic songs.
+  class ListSource implements QueueSource {
+    label = 'list';
+    constructor(private ids: string[]) {}
+    private i = 0;
+    reset(_seed: Song): void {
+      this.i = 0;
+    }
+    next(_last: Song | null): Song | null {
+      this.i += 1;
+      return this.ids[this.i - 1] ? song(this.ids[this.i - 1]) : null;
+    }
+  }
+
+  function lastAddedId(): string {
+    const calls = addMock.mock.calls;
+    return calls[calls.length - 1][0].id;
+  }
+
+  test('near the start, previous loads the actually-previous song from history', async () => {
+    await playFrom(new ListSource(['b', 'c']), song('a')); // playing a
+    await skipToNext(); // -> b, history [a]
+    expect(lastAddedId()).toBe('b');
+
+    await skipToPrevious(); // position 0 (<3s) -> pop history -> a
+    expect(lastAddedId()).toBe('a');
+    // seekTo(0) is NOT used when there's real history to go back to
+    expect((TrackPlayer.seekTo as jest.Mock)).not.toHaveBeenCalled();
+  });
+
+  test('more than 3s into a track, previous restarts it (no history pop)', async () => {
+    (TrackPlayer.getProgress as jest.Mock).mockResolvedValue({position: 42, duration: 200, buffered: 0});
+    await playFrom(new ListSource(['b']), song('a'));
+    await skipToNext(); // -> b, history [a]
+    addMock.mockClear();
+
+    await skipToPrevious(); // 42s in -> restart current, don't touch history
+    expect(TrackPlayer.seekTo).toHaveBeenCalledWith(0);
+    expect(addMock).not.toHaveBeenCalled();
+  });
+
+  test('with no history (session start), previous restarts current', async () => {
+    await playFrom(new ListSource([]), song('only'));
+    addMock.mockClear();
+    await skipToPrevious(); // position 0 but history empty -> restart
+    expect(TrackPlayer.seekTo).toHaveBeenCalledWith(0);
+    expect(addMock).not.toHaveBeenCalled();
   });
 });
