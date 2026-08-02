@@ -175,7 +175,7 @@ async function validateUrl(url: string, headers: Record<string, string>): Promis
 
 export async function resolveStreamUrl(
   videoId: string,
-  opts: {quality?: 'highest' | 'lowest'} = {},
+  opts: {quality?: 'highest' | 'lowest'; title?: string; artist?: string} = {},
 ): Promise<ResolvedStream> {
   const quality = opts.quality ?? 'highest';
   let tube: Innertube;
@@ -184,33 +184,83 @@ export async function resolveStreamUrl(
   } catch (e) {
     throw new StreamResolveError('session bootstrap failed: ' + String(e), {cause: e});
   }
-  let lastErr: unknown;
+
+  // 1) Try the exact videoId across all clients.
+  const direct = await tryAllClients(tube, videoId, quality);
+  if (direct) return direct;
+
+  // 2) SEARCH FALLBACK. A big class of failures is YouTube Music "- Topic"
+  // art tracks (and other licensed catalog entries) that return UNPLAYABLE
+  // "This video is not available" for EVERY anonymous client (confirmed:
+  // yt-dlp can't stream them either). But the same song almost always exists
+  // under a DIFFERENT, playable videoId (official "Audio"/lyric upload, the
+  // original, etc.). So when the stored id won't stream, search "title artist"
+  // and use the first result that DOES stream. Recovers real songs that were
+  // otherwise permanently "failed"/unplayable. Requires title (artist helps).
+  if (opts.title) {
+    const viaSearch = await resolveViaSearch(tube, videoId, opts.title, opts.artist, quality);
+    if (viaSearch) return viaSearch;
+  }
+
+  // Reset the cached singleton so the next call re-bootstraps fresh.
+  yt = null;
+  throw new StreamResolveError(`could not resolve stream for ${videoId} (unplayable; no playable alternate found)`);
+}
+
+/** Try every client for one videoId; return the first playable stream or null
+ * (never throws -- a totally-unplayable video just yields null). */
+async function tryAllClients(
+  tube: Innertube,
+  videoId: string,
+  quality: 'highest' | 'lowest',
+): Promise<ResolvedStream | null> {
   for (const client of CLIENTS) {
     try {
       const got = await extractStream(tube, videoId, client, CLIENT_HEADERS[client], quality);
       if (got) return got;
-      lastErr = new Error(`${client} stream URL failed resolve-time validation (non-2xx)`);
-    } catch (e) {
-      lastErr = e;
+    } catch {
+      // try next client
     }
   }
-
-  // (Tried an authed-session fallback here -- retrying via getAuthedInnertube()
-  // when anonymous clients yield no audio. It does NOT help: the device-code
-  // "TV" OAuth token 400s on the /youtubei/v1/player endpoint for these tracks
-  // -- the same INVALID_ARGUMENT limitation that blocks yt.music.* with this
-  // token -- and it only added latency/timeouts to each already-failing song.
-  // The remaining failures (a track with no anonymous audio format) are
-  // YouTube PoToken/SABR gating; recovering them needs a PoToken, not an authed
-  // retry, so it's deliberately NOT attempted here.)
-
-  // Reset the cached singleton so the next call re-bootstraps fresh.
-  yt = null;
-  throw new StreamResolveError(
-    `could not resolve stream for ${videoId}: ${String(lastErr)}`,
-    {cause: lastErr},
-  );
+  return null;
 }
+
+/** Search "title artist" and return a stream for the first result (other than
+ * the original, unplayable id) that actually streams. */
+async function resolveViaSearch(
+  tube: Innertube,
+  originalId: string,
+  title: string,
+  artist: string | undefined,
+  quality: 'highest' | 'lowest',
+): Promise<ResolvedStream | null> {
+  // Drop the auto-generated "- Topic" suffix from the artist so the query is
+  // natural ("Ali Sethi" not "Ali Sethi - Topic").
+  const cleanArtist = (artist ?? '').replace(/\s*-\s*Topic\s*$/i, '').trim();
+  const query = cleanArtist ? `${title} ${cleanArtist}` : title;
+  let results: Array<{id?: string; video_id?: string}> = [];
+  try {
+    const res: any = await tube.search(query, {type: 'video'});
+    results = res.videos ?? res.results ?? [];
+  } catch {
+    return null;
+  }
+  let tried = 0;
+  for (const v of results) {
+    const id = (v.id ?? v.video_id) as string | undefined;
+    if (!id || id === originalId) continue;
+    if (tried >= SEARCH_FALLBACK_MAX) break;
+    tried += 1;
+    const got = await tryAllClients(tube, id, quality);
+    if (got) return got;
+  }
+  return null;
+}
+
+// How many search results to probe before giving up -- keeps the fallback
+// bounded (each probe is a player request). The canonical upload almost
+// always ranks in the first couple, so a few is plenty.
+const SEARCH_FALLBACK_MAX = 5;
 
 /**
  * Pull a validated, playable stream out of one Innertube session/client, or

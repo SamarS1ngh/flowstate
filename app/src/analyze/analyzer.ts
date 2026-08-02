@@ -163,7 +163,9 @@ async function analyzeSongUncached(videoId: string): Promise<boolean> {
 // which is what keeps the batch moving; the abandoned work finishes (or
 // fails) on its own with no further effect since nothing awaits it anymore.
 const STAGE_TIMEOUT_MS = {
-  resolve: 20_000,
+  // Generous because a failed direct resolve triggers the search fallback
+  // (a search + up to a few player probes for a playable alternate).
+  resolve: 45_000,
   download: 90_000,
   decode: 60_000,
   infer: 30_000,
@@ -196,8 +198,22 @@ function withTimeout<T>(promise: Promise<T>, ms: number, stage: string): Promise
  * stream throttling (see the long note this replaced).
  */
 async function downloadStage(videoId: string): Promise<string> {
+  // Look up title/artist so resolveStreamUrl's search-fallback can find a
+  // playable alternate for unplayable "- Topic" tracks (see resolver.ts).
+  let meta: {title?: string; artist?: string} = {};
+  try {
+    const db = await ensureBaseSchema();
+    try {
+      const s = db.getSong(videoId);
+      if (s) meta = {title: s.title, artist: s.artist};
+    } finally {
+      db.close();
+    }
+  } catch {
+    // no meta -> resolver just skips the search fallback
+  }
   const stream = await withTimeout(
-    resolveStreamUrl(videoId, {quality: 'lowest'}),
+    resolveStreamUrl(videoId, {quality: 'lowest', ...meta}),
     STAGE_TIMEOUT_MS.resolve,
     'resolve',
   );

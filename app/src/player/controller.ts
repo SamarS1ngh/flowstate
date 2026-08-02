@@ -39,12 +39,15 @@ export function consumeFallbackStatus(): FallbackKind | null {
 
 async function load(song: Song): Promise<void> {
   // retry-once semantics per design: fresh extraction on first failure, then skip
+  // Pass title/artist so the resolver's search-fallback can find a playable
+  // alternate when the stored videoId is an unplayable "- Topic" art track.
+  const meta = {title: song.title, artist: song.artist};
   let stream: {url: string; headers?: Record<string, string>};
   try {
-    stream = await resolveStreamUrl(song.videoId);
+    stream = await resolveStreamUrl(song.videoId, meta);
   } catch (e) {
     if (!(e instanceof StreamResolveError)) throw e;
-    stream = await resolveStreamUrl(song.videoId); // second attempt
+    stream = await resolveStreamUrl(song.videoId, meta); // second attempt
   }
   await TrackPlayer.reset();
   await TrackPlayer.add({
