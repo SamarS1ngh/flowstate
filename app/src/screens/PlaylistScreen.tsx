@@ -8,8 +8,10 @@ import {
   Text,
   View,
 } from 'react-native';
+import LinearGradient from 'react-native-linear-gradient';
 import {SafeAreaView, useSafeAreaInsets} from 'react-native-safe-area-context';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
+import {useArtGradient} from '../ui/useArtGradient';
 import type {RootStackParamList} from '../App';
 import {openVibesDb, VibesDb} from '../db/vibesDb';
 import {playFrom, reportFallback} from '../player/controller';
@@ -279,6 +281,9 @@ export default function PlaylistScreen({route, navigation}: Props) {
     () => `${songs.length} song${songs.length === 1 ? '' : 's'} · ${analyzedCount} analyzed`,
     [songs.length, analyzedCount],
   );
+  // Header backdrop tinted by the playlist's first cover art (same look as the
+  // Player), so each playlist glows in its own colour.
+  const artGradient = useArtGradient(coverIds[0]);
 
   if (loading) {
     return (
@@ -290,6 +295,14 @@ export default function PlaylistScreen({route, navigation}: Props) {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
+      {/* Art-tinted backdrop behind the header, fading to the app bg by ~halfway
+          down so the song list sits on plain dark. */}
+      <LinearGradient
+        colors={artGradient}
+        locations={[0, 0.28, 0.55]}
+        style={styles.backdrop}
+        pointerEvents="none"
+      />
       {/* Absolutely-positioned children ignore their parent's padding (CSS
           padding-box semantics), so the SafeAreaView's top inset above
           doesn't shift this floating back button on its own -- insets.top
@@ -459,6 +472,7 @@ function formatDuration(seconds: number): string {
 
 const styles = StyleSheet.create({
   container: {flex: 1, backgroundColor: colors.bg},
+  backdrop: {position: 'absolute', top: 0, left: 0, right: 0, height: '60%'},
   backRow: {
     position: 'absolute',
     top: spacing.sm,
