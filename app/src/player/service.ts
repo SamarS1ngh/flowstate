@@ -1,5 +1,10 @@
 import TrackPlayer, {Event} from 'react-native-track-player';
-import {skipToNext, skipToPrevious, togglePlayPause} from './controller';
+import {
+  onNativeTrackChanged,
+  skipToNext,
+  skipToPrevious,
+  togglePlayPause,
+} from './controller';
 
 // LIMITATION (post-process-death): this headless JS service only runs while
 // the app process is alive (foreground or backgrounded-but-resident). If
@@ -21,5 +26,14 @@ export async function playbackService(): Promise<void> {
   TrackPlayer.addEventListener(Event.RemoteNext, () => skipToNext());
   TrackPlayer.addEventListener(Event.RemotePrevious, () => skipToPrevious());
   TrackPlayer.addEventListener(Event.RemoteStop, () => TrackPlayer.stop());
+  // Drives the windowed pre-buffer forward: fires when the player advances to
+  // the pre-buffered next track (user skip OR a song ending and auto-advancing
+  // within the queue). See controller.onNativeTrackChanged.
+  TrackPlayer.addEventListener(Event.PlaybackActiveTrackChanged, () =>
+    onNativeTrackChanged(),
+  );
+  // Safety net: fires only when the queue runs out with nothing staged (an
+  // enqueue failed, or the source is momentarily empty) -- fall back to a live
+  // resolve of the next song.
   TrackPlayer.addEventListener(Event.PlaybackQueueEnded, () => skipToNext());
 }
