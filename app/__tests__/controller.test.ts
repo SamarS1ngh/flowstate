@@ -61,6 +61,11 @@ const prefetchedMock = getPrefetchedStream as jest.Mock;
 const requestPrefetchMock = requestPrefetch as jest.Mock;
 
 const flush = () => new Promise<void>(r => setImmediate(() => r()));
+// skipToNext/skipToPrevious are fire-and-forget now (a single-flight loader runs
+// the async load), so let several microtask rounds drain before asserting.
+const settle = async () => {
+  for (let i = 0; i < 12; i++) await flush();
+};
 
 function song(id: string): Song {
   return {videoId: id, title: id, artist: 'artist', durationS: 200, hasVibe: false};
@@ -124,9 +129,29 @@ describe('single-track + prefetch playback', () => {
     resolveMock.mockClear();
 
     await skipToNext(); // -> b, which is pre-resolved
+    await settle();
     expect(resolveMock).not.toHaveBeenCalled(); // never re-resolved
     expect(tp.add.mock.calls.at(-1)?.[0].url).toBe('https://cdn/b.mp3');
     expect(nowPlaying()?.videoId).toBe('b');
+  });
+
+  test('a rapid burst of skips loads ONLY the final song, not each one', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c', 'd', 'e']), song('a'));
+    await settle();
+    tp.add.mockClear();
+    resolveMock.mockClear();
+
+    // Four taps in the same tick (no await between) -> current advances to 'e'.
+    void skipToNext();
+    void skipToNext();
+    void skipToNext();
+    void skipToNext();
+    expect(nowPlaying()?.videoId).toBe('e'); // UI advanced instantly
+    await settle();
+
+    // Only 'e' was actually loaded -- b/c/d were never added to the player.
+    expect(addedIds()).toEqual(['e']);
+    expect(resolvedIds()).toEqual(['e']);
   });
 
   test('a skip to a NON-prefetched song resolves live', async () => {
@@ -134,6 +159,7 @@ describe('single-track + prefetch playback', () => {
     await flush();
     resolveMock.mockClear();
     await skipToNext();
+    await settle();
     expect(resolvedIds()).toContain('b');
     expect(nowPlaying()?.videoId).toBe('b');
   });
@@ -173,6 +199,7 @@ describe('skip fallback + previous', () => {
     tp.stop.mockClear();
 
     await skipToNext();
+    await settle();
     expect(resolveMock).toHaveBeenCalledTimes(5); // capped
     expect(tp.stop).toHaveBeenCalledTimes(1);
     expect(consumeFallbackStatus()).toBe('error');
@@ -181,8 +208,10 @@ describe('skip fallback + previous', () => {
   test('previous walks history back near the start of the track', async () => {
     await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
     await skipToNext(); // -> b, history [a]
+    await settle();
     tp.add.mockClear();
     await skipToPrevious(); // pos 0 -> pop -> a
+    await settle();
     expect(tp.add.mock.calls.at(-1)?.[0].id).toBe('a');
     expect(tp.seekTo).not.toHaveBeenCalled();
   });
@@ -192,6 +221,7 @@ describe('skip fallback + previous', () => {
     await playFrom(new ListSource(['a', 'b']), song('a'));
     tp.add.mockClear();
     await skipToPrevious();
+    await settle();
     expect(tp.seekTo).toHaveBeenCalledWith(0);
     expect(tp.add).not.toHaveBeenCalled();
   });

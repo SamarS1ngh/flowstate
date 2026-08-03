@@ -61,29 +61,93 @@ async function resolveStream(song: Song): Promise<Stream> {
   return withTimeout(resolveWithRetry(song), RESOLVE_TIMEOUT_MS);
 }
 
-// Load one song into the (single-track) player and play it. Stops the OLD track
-// FIRST -- before the (possibly multi-second) resolve -- so its audio doesn't
-// keep playing and its timer doesn't keep ticking while the screen already shows
-// the new song; the player sits empty (state None -> loading spinner, 0:00)
-// until the new stream is ready. Throws if the song can't be resolved so callers
-// can react. After it plays, kicks off prefetch of the NEXT song.
-async function load(song: Song): Promise<void> {
-  await TrackPlayer.reset();
-  const stream = await resolveStream(song); // throws on failure -> caller retries
-  await TrackPlayer.add({
+// The song actually loaded in the player right now (distinct from `current`,
+// which is the OPTIMISTIC ui target that a rapid tap advances ahead of the
+// audio). Drives history + the "already playing it?" coalescing check.
+let loadedSong: Song | null = null;
+// True while a loader run is queued/active, so rapid taps don't each start a
+// loader -- the one running chases the latest `current`.
+let loaderScheduled = false;
+
+function toTrack(song: Song, stream: Stream) {
+  return {
     id: song.videoId,
     url: stream.url,
     headers: stream.headers,
     title: song.title,
     artist: song.artist,
     duration: song.durationS ?? undefined,
-  });
+  };
+}
+
+// Load one song into the (single-track) player and play it. Stops the OLD track
+// FIRST -- before the (possibly multi-second) resolve -- so its audio doesn't
+// keep playing while the screen already shows the new song. Returns false if a
+// newer tap moved `current` past this song before it could start playing, so a
+// superseded intermediate in a rapid-tap burst NEVER becomes audible (the loader
+// then chases the newest target). Throws only on a real resolve failure.
+async function doLoad(song: Song, pushPrev: boolean): Promise<boolean> {
+  await TrackPlayer.reset();
+  if (current && current.videoId !== song.videoId) return false; // superseded
+  const stream = await resolveStream(song); // throws on failure -> caller retries
+  if (current && current.videoId !== song.videoId) return false; // superseded
+  await TrackPlayer.add(toTrack(song, stream));
   await TrackPlayer.play();
+  if (pushPrev && loadedSong && loadedSong.videoId !== song.videoId) {
+    pushHistory(loadedSong);
+  }
+  loadedSong = song;
   current = song;
   emitNowPlaying();
-  // Spotify-style: download the likely-next song to disk now, so the next skip
-  // plays from a local file instantly. Deduped + single-flight in prefetchCache.
+  // Prefetch the next song's stream URL so the following skip skips the resolve.
   requestPrefetch(source?.peekNext?.() ?? null);
+  return true;
+}
+
+// Loader loop: load whatever `current` is and keep chasing it while it moves
+// (rapid taps advance `current` synchronously). Coalesces a burst into a single
+// audible load -- the final song -- resolving at most one superseded target
+// along the way. Handles the retry-on-unplayable cap.
+async function loaderLoop(pushPrev: boolean): Promise<void> {
+  let fails = 0;
+  while (source && current && (!loadedSong || loadedSong.videoId !== current.videoId)) {
+    const target = current;
+    try {
+      const ok = await doLoad(target, pushPrev);
+      if (!ok) continue; // superseded -> loop re-reads the newer `current`
+      fails = 0;
+    } catch {
+      lastFallback = null;
+      fails += 1;
+      if (fails >= MAX_CONSECUTIVE_LOAD_FAILURES) {
+        await TrackPlayer.stop();
+        lastFallback = 'error';
+        return;
+      }
+      const nx = source.next(target); // unplayable -> skip forward
+      if (nx) {
+        current = nx;
+        emitNowPlaying();
+      } else {
+        await TrackPlayer.stop();
+        return;
+      }
+    }
+  }
+}
+
+// Kick a loader run (single-flight, serialized). A no-op if one is already
+// queued/running -- that run will pick up the latest `current`.
+function requestLoad(pushPrev: boolean): void {
+  if (loaderScheduled) return;
+  loaderScheduled = true;
+  void serialize(async () => {
+    try {
+      await loaderLoop(pushPrev);
+    } finally {
+      loaderScheduled = false;
+    }
+  });
 }
 
 // Play history so "previous" walks back through the songs actually played.
@@ -115,81 +179,62 @@ export function consumeFallbackStatus(): FallbackKind | null {
   return k;
 }
 
-export function playFrom(src: QueueSource, first: Song): Promise<void> {
-  return serialize(async () => {
-    source = src;
-    lastFallback = null;
-    history.length = 0;
-    src.reset(first);
-    // Optimistic: reflect the target song immediately (before the resolve) so a
-    // caller that navigates to the Player on tap shows this song right away with
-    // a loading state; load() re-affirms it.
-    current = first;
-    emitNowPlaying();
-    await load(first);
-  });
-}
-
 // Safety cap for the retry-on-unplayable loop. Without it, an offline device
 // (every resolve fails) plus a QueueSource whose next() never runs dry
 // (VibeQueue's random fallback) would loop forever.
 const MAX_CONSECUTIVE_LOAD_FAILURES = 5;
 
-export function skipToNext(): Promise<void> {
+export function playFrom(src: QueueSource, first: Song): Promise<void> {
   return serialize(async () => {
-    if (!source) return;
+    source = src;
     lastFallback = null;
-    const leaving = current; // song we're moving away from -> onto history
-    let candidate = source.next(current);
-    let consecutiveFailures = 0;
-    while (candidate) {
-      current = candidate; // optimistic art/title update
-      emitNowPlaying();
-      try {
-        await load(candidate);
-        pushHistory(leaving);
-        return;
-      } catch {
-        lastFallback = null;
-        consecutiveFailures += 1;
-        if (consecutiveFailures >= MAX_CONSECUTIVE_LOAD_FAILURES) {
-          await TrackPlayer.stop();
-          lastFallback = 'error';
-          return;
-        }
-        candidate = source.next(candidate); // unplayable -> skip forward
-      }
-    }
-    await TrackPlayer.stop();
+    history.length = 0;
+    loadedSong = null; // fresh session -> nothing to push to history
+    src.reset(first);
+    // Optimistic: reflect the target song immediately (before the resolve) so a
+    // caller that navigates to the Player on tap shows this song right away with
+    // a loading state; doLoad re-affirms it.
+    current = first;
+    emitNowPlaying();
+    await doLoad(first, false);
   });
 }
 
-export function skipToPrevious(): Promise<void> {
-  return serialize(async () => {
-    // A few seconds into the track, "previous" restarts it (like most players);
-    // only jump to the actual previous song near the start.
-    try {
-      const pos = await TrackPlayer.getProgress();
-      if (pos.position > 3) {
-        await TrackPlayer.seekTo(0);
-        return;
-      }
-    } catch {
-      // ignore -- fall through to history behavior
-    }
-    const prev = history.pop();
-    if (!prev) {
-      await TrackPlayer.seekTo(0); // no history -> restart current
+// Rapid-tap friendly: advance `current` (art/title) SYNCHRONOUSLY per tap so the
+// UI flips instantly, then let the single-flight loader chase the latest target.
+// A burst of taps loads only the song you land on -- not each one in between.
+export function skipToNext(): Promise<void> {
+  if (!source) return Promise.resolve();
+  lastFallback = null;
+  const cand = source.next(current);
+  if (cand) {
+    current = cand;
+    emitNowPlaying();
+  }
+  requestLoad(true);
+  return Promise.resolve();
+}
+
+export async function skipToPrevious(): Promise<void> {
+  // A few seconds into the track, "previous" restarts it (like most players);
+  // only jump to the actual previous song near the start.
+  try {
+    const pos = await TrackPlayer.getProgress();
+    if (pos.position > 3) {
+      await TrackPlayer.seekTo(0);
       return;
     }
-    current = prev; // optimistic
-    emitNowPlaying();
-    try {
-      await load(prev); // do NOT push prev onto history
-    } catch {
-      await TrackPlayer.seekTo(0); // previous unplayable -> restart current
-    }
-  });
+  } catch {
+    // ignore -- fall through to history behavior
+  }
+  const prev = history.pop();
+  if (!prev) {
+    await TrackPlayer.seekTo(0); // no history -> restart current
+    return;
+  }
+  current = prev; // optimistic art flip
+  emitNowPlaying();
+  requestLoad(false); // load prev; pushPrev=false -> do NOT re-push it to history
 }
 
 export function nowPlaying(): Song | null {
