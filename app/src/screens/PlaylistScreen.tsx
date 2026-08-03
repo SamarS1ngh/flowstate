@@ -188,9 +188,8 @@ export default function PlaylistScreen({route, navigation}: Props) {
     retryFailedAnalysis(playlistId);
   };
 
-  const playIndex = async (index: number) => {
+  const playIndex = (index: number) => {
     const song = songs[index];
-    setStartingId(song.videoId);
     try {
       const seed = vibeSongs.find(v => v.videoId === song.videoId);
       // Plan D Task 6 lazy scheduling: a song that starts playing but isn't
@@ -206,10 +205,14 @@ export default function PlaylistScreen({route, navigation}: Props) {
           })
           .catch(() => {});
       }
-      // Vibe mode only applies when the tapped song is analyzed -- an
-      // unanalyzed seed has no embedding, and VibeQueue.reset() would throw
-      // (see engine/vibeQueue.ts: reset requires the seed to be in scope).
-      // Falling back to SimpleQueue here is what guards against that throw.
+      // Build the right queue, then navigate to the Player FIRST (instant) and
+      // resolve+play in the background -- playFrom sets the now-playing song
+      // optimistically so the screen changes immediately, no waiting on the
+      // network resolve. Vibe mode only applies when the tapped song is
+      // analyzed -- an unanalyzed seed has no embedding and VibeQueue.reset()
+      // would throw, so we fall back to SimpleQueue there.
+      let queue: VibeQueue | SimpleQueue;
+      let first: Song;
       if (vibeMode && seed && db) {
         // ensureTables() is a defensive no-op CREATE TABLE IF NOT EXISTS --
         // App.tsx already calls it once at bootstrap, but this covers the
@@ -217,12 +220,12 @@ export default function PlaylistScreen({route, navigation}: Props) {
         const feedbackStore = new FeedbackStore(db.handle);
         feedbackStore.ensureTables();
         const feedback = feedbackStore.snapshot(Date.now());
-        const queue = new VibeQueue(seed, 'drift', {
+        queue = new VibeQueue(seed, 'drift', {
           songs: vibeSongs,
           feedback,
           onFallback: reportFallback,
         });
-        await playFrom(queue, seed.song);
+        first = seed.song;
       } else {
         if (vibeMode && !seed) {
           // Vibe mode is ON, but this particular song has no analysis data
@@ -230,13 +233,15 @@ export default function PlaylistScreen({route, navigation}: Props) {
           // reads as vibe mode randomly "not working" for some songs.
           setNotice('Song not analyzed yet — normal queue');
         }
-        await playFrom(new SimpleQueue(songs, index), song);
+        queue = new SimpleQueue(songs, index);
+        first = song;
       }
       navigation.navigate('Player');
+      void playFrom(queue, first).catch(e =>
+        Alert.alert('Could not play song', e instanceof Error ? e.message : 'Unknown error'),
+      );
     } catch (e) {
       Alert.alert('Could not play song', e instanceof Error ? e.message : 'Unknown error');
-    } finally {
-      setStartingId(null);
     }
   };
 
@@ -244,10 +249,9 @@ export default function PlaylistScreen({route, navigation}: Props) {
   // instead of one the user picked -- same VibeQueue construction as tapping
   // an analyzed row above, just with a randomly-chosen seed. No new engine
   // behavior, purely a different seed choice.
-  const onVibeShuffle = async () => {
+  const onVibeShuffle = () => {
     if (!db || vibeSongs.length === 0) return;
     const seed = vibeSongs[Math.floor(Math.random() * vibeSongs.length)];
-    setStartingId(seed.videoId);
     try {
       const feedbackStore = new FeedbackStore(db.handle);
       feedbackStore.ensureTables();
@@ -257,12 +261,16 @@ export default function PlaylistScreen({route, navigation}: Props) {
         feedback,
         onFallback: reportFallback,
       });
-      await playFrom(queue, seed.song);
+      // Navigate to the Player FIRST (instant), then resolve+play in the
+      // background. playFrom sets the now-playing song optimistically, so the
+      // Player shows this song right away with a buffering state -- no waiting
+      // on the network resolve before the screen changes.
       navigation.navigate('Player');
+      void playFrom(queue, seed.song).catch(e =>
+        Alert.alert('Could not start vibe shuffle', e instanceof Error ? e.message : 'Unknown error'),
+      );
     } catch (e) {
       Alert.alert('Could not start vibe shuffle', e instanceof Error ? e.message : 'Unknown error');
-    } finally {
-      setStartingId(null);
     }
   };
 

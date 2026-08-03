@@ -35,6 +35,7 @@ import {
   reportFallback,
   skipToNext,
   skipToPrevious,
+  subscribeNowPlaying,
   togglePlayPause,
   FallbackKind,
 } from '../player/controller';
@@ -141,9 +142,14 @@ export default function PlayerScreen({navigation}: Props) {
   useTrackPlayerEvents([Event.PlaybackActiveTrackChanged], refreshSong);
 
   // Also catch the case where this screen is reached right after playFrom()
-  // resolved, before any track-changed event has fired.
+  // resolved, before any track-changed event has fired -- and, crucially, the
+  // OPTIMISTIC path: playFrom() sets the now-playing song before the network
+  // resolve, so the screen (navigated to on tap, before load finishes) shows
+  // that song immediately instead of the previous/blank one. subscribeNowPlaying
+  // fires on that optimistic set; the mount call covers an already-set current.
   useEffect(() => {
     refreshSong();
+    return subscribeNowPlaying(refreshSong);
   }, [refreshSong]);
 
   // FeedbackStore + the raw VibesDb handle both need a live db handle;

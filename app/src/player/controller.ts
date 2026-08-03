@@ -109,6 +109,7 @@ async function load(song: Song): Promise<void> {
   });
   await TrackPlayer.play();
   current = song;
+  emitNowPlaying();
   // Warm the cache for the next skip. Non-blocking -- this song is already
   // playing; the prefetch races in the background.
   schedulePrefetch();
@@ -120,6 +121,12 @@ export async function playFrom(src: QueueSource, first: Song): Promise<void> {
   history.length = 0; // fresh session -> no previous
   prefetch = null; // don't let a prior session's cached stream leak in
   src.reset(first);
+  // Optimistic: reflect the target song RIGHT NOW (before the network resolve),
+  // so a caller that navigates to the Player on tap shows this song immediately
+  // -- with a buffering state -- instead of waiting for load() to finish. The
+  // real audio follows when load() completes; that just re-affirms `current`.
+  current = first;
+  emitNowPlaying();
   await load(first);
 }
 
@@ -189,6 +196,22 @@ export async function skipToPrevious(): Promise<void> {
 
 export function nowPlaying(): Song | null {
   return current;
+}
+
+// Lets the Player screen react the instant `current` changes -- including the
+// OPTIMISTIC set in playFrom (before the resolve), which no TrackPlayer event
+// covers (the track hasn't loaded yet). Subsequent real track changes still
+// also arrive via TrackPlayer's PlaybackActiveTrackChanged; both call the same
+// refresh, so a duplicate is a harmless no-op.
+const nowPlayingListeners = new Set<() => void>();
+export function subscribeNowPlaying(cb: () => void): () => void {
+  nowPlayingListeners.add(cb);
+  return () => {
+    nowPlayingListeners.delete(cb);
+  };
+}
+function emitNowPlaying(): void {
+  for (const cb of nowPlayingListeners) cb();
 }
 
 // Smallest viable seam (Task 3) so screens can reach the active queue for
