@@ -1,7 +1,9 @@
 import React, {useCallback, useEffect, useMemo, useReducer, useRef, useState} from 'react';
 import {Alert, Dimensions, FlatList, StyleSheet, Text, View} from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
+import ImageColors from 'react-native-image-colors';
 import {SafeAreaView} from 'react-native-safe-area-context';
+import {thumbUrl} from '../ui/thumb';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import {Gesture, GestureDetector} from 'react-native-gesture-handler';
 import Animated, {
@@ -52,6 +54,17 @@ import Thumbnail from '../ui/Thumbnail';
 import {colors, gradients, radii, spacing, thumbSize, type} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Player'>;
+
+// Mix a hex colour toward black by `amount` (0..1) -> "rgb(r,g,b)". Used to
+// tone an album-art colour down into a legible gradient backdrop.
+function darken(hex: string, amount: number): string {
+  const h = hex.replace('#', '');
+  const n = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const r = Math.round(parseInt(n.slice(0, 2), 16) * (1 - amount));
+  const g = Math.round(parseInt(n.slice(2, 4), 16) * (1 - amount));
+  const b = Math.round(parseInt(n.slice(4, 6), 16) * (1 - amount));
+  return `rgb(${r},${g},${b})`;
+}
 
 function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
@@ -109,9 +122,48 @@ export default function PlayerScreen({navigation}: Props) {
   // below. null only on first mount, where a plain fade reads better than a
   // directional slide from nowhere.
   const [swipeDir, setSwipeDir] = useState<'left' | 'right' | null>(null);
+  // Backdrop gradient stops, derived from the current song's artwork so the
+  // now-playing screen glows in the album's colour (Spotify/Apple style).
+  // Falls back to the app's violet backdrop until/if extraction fails.
+  const [artGradient, setArtGradient] = useState<string[]>(gradients.playerBackdrop);
 
   const progress = useProgress(500);
   const playbackState = usePlaybackState();
+
+  // Extract a dominant colour from the artwork and build a tinted-into-black
+  // gradient from it. Cached per videoId by the native lib; falls back to the
+  // violet backdrop on any failure so the screen never ends up flat.
+  const currentVideoId = song?.videoId;
+  useEffect(() => {
+    let cancelled = false;
+    if (!currentVideoId) {
+      setArtGradient(gradients.playerBackdrop);
+      return;
+    }
+    (async () => {
+      try {
+        const res = await ImageColors.getColors(thumbUrl(currentVideoId, 'hqdefault'), {
+          fallback: colors.accent,
+          cache: true,
+          key: currentVideoId,
+        });
+        const base =
+          res.platform === 'android'
+            ? res.vibrant || res.dominant || res.average || colors.accent
+            : res.platform === 'ios'
+              ? res.primary || res.detail || colors.accent
+              : colors.accent;
+        if (!cancelled) {
+          setArtGradient([darken(base, 0.5), darken(base, 0.78), colors.bg]);
+        }
+      } catch {
+        if (!cancelled) setArtGradient(gradients.playerBackdrop);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentVideoId]);
 
   // Design note (previous-song tracking for reject pairs): the controller
   // only exposes nowPlaying() as a point-in-time getter, not a history. We
@@ -380,8 +432,8 @@ export default function PlayerScreen({navigation}: Props) {
           instead of flat black. Fades to the app bg by the lower third so the
           transport/up-next sit on plain dark. */}
       <LinearGradient
-        colors={gradients.playerBackdrop}
-        locations={[0, 0.4, 0.75]}
+        colors={artGradient}
+        locations={[0, 0.4, 0.78]}
         style={StyleSheet.absoluteFill}
         pointerEvents="none"
       />
@@ -418,9 +470,13 @@ export default function PlayerScreen({navigation}: Props) {
             </View>
 
             <View style={styles.info}>
-              <Text style={styles.title} numberOfLines={2}>
-                {song.title}
-              </Text>
+              {/* Fixed-height title box (always 2 lines tall) so a 1-line vs
+                  2-line song title doesn't shift everything below it. */}
+              <View style={styles.titleWrap}>
+                <Text style={styles.title} numberOfLines={2}>
+                  {song.title}
+                </Text>
+              </View>
               <Text style={styles.artist} numberOfLines={1}>
                 {song.artist}
               </Text>
@@ -457,9 +513,14 @@ export default function PlayerScreen({navigation}: Props) {
                   ))}
                 </View>
 
-                {fallbackStatus && fallbackStatus !== 'error' ? (
-                  <Text style={styles.fallbackText}>{FALLBACK_LABEL[fallbackStatus]}</Text>
-                ) : null}
+                {/* Always rendered at a fixed height so the status text
+                    appearing/disappearing between songs doesn't shift the
+                    transport below. */}
+                <Text style={styles.fallbackText} numberOfLines={1}>
+                  {fallbackStatus && fallbackStatus !== 'error'
+                    ? FALLBACK_LABEL[fallbackStatus]
+                    : ' '}
+                </Text>
               </View>
             ) : (
               // Action row is never left empty: a real, working "start a
@@ -606,7 +667,10 @@ const styles = StyleSheet.create({
   topBarSpacer: {width: 40},
   artWrap: {marginTop: spacing.lg},
   info: {alignItems: 'center', marginTop: spacing.xl, width: '100%'},
-  title: {...type.title, textAlign: 'center'},
+  // Two lines of the title's line-height, so titles of any length occupy the
+  // same vertical space and nothing below jumps between songs.
+  titleWrap: {height: 30 * 2, justifyContent: 'center', width: '100%'},
+  title: {...type.title, textAlign: 'center', lineHeight: 30},
   artist: {color: colors.textSecondary, fontSize: 15, marginTop: spacing.sm, textAlign: 'center'},
   errorText: {color: colors.danger, fontSize: 13, textAlign: 'center', marginTop: spacing.md},
   vibeSection: {marginTop: spacing.lg, width: '100%', alignItems: 'center'},
@@ -617,7 +681,13 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   chipRow: {flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center'},
-  fallbackText: {color: colors.textTertiary, fontSize: 12, textAlign: 'center', marginTop: spacing.xs},
+  fallbackText: {
+    color: colors.textTertiary,
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: spacing.xs,
+    height: 16, // reserved slot -> no shift when it toggles on/off
+  },
   lower: {flex: 1, paddingHorizontal: spacing.xl, minHeight: 0},
   sliderWrap: {height: 36, justifyContent: 'center', marginTop: spacing.md},
   timeRow: {
