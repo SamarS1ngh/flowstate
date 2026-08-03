@@ -188,6 +188,19 @@ export default function PlayerScreen({navigation}: Props) {
   }, [src]);
 
   const isPlaying = playbackState.state === State.Playing;
+  // "Loading" = we have a target song (optimistic open / skip) but the audio
+  // isn't actually playing yet -- it's still resolving or buffering. Show a
+  // spinner on the transport button until it truly plays, so the first song
+  // doesn't look "playing" (or paused) before any sound comes out. Paused /
+  // stopped / errored are NOT loading -- those show the normal play button.
+  const pbState = playbackState.state;
+  const isLoading =
+    !!song &&
+    (pbState === State.None ||
+      pbState === State.Loading ||
+      pbState === State.Buffering ||
+      pbState === State.Ready) &&
+    fallbackStatus !== 'error';
   const isLock = src instanceof VibeQueue && src.label === 'vibe:lock';
 
   // Up Next preview (Task: fill the emptiness). SimpleQueue's order is fully
@@ -510,6 +523,7 @@ export default function PlayerScreen({navigation}: Props) {
             <CircleButton
               icon={isPlaying ? 'pause' : 'play'}
               size={72}
+              loading={isLoading}
               onPress={() => togglePlayPause()}
             />
             <IconButton name="next" size={30} onPress={handleNext} />

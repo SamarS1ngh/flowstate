@@ -1,10 +1,12 @@
 import React from 'react';
-import {Pressable, StyleSheet, ViewStyle} from 'react-native';
+import {ActivityIndicator, Pressable, StyleSheet, ViewStyle} from 'react-native';
 import Icon, {IconName} from './Icon';
 import {colors} from './theme';
 
 // Big circular white play/pause button -- the single most recognisable
 // piece of the reference app's now-playing screen and playlist header.
+// When `loading` is true it shows a spinner instead of the icon and ignores
+// taps -- used while a track is resolving/buffering but not yet audible.
 export default function CircleButton({
   icon,
   onPress,
@@ -12,6 +14,7 @@ export default function CircleButton({
   iconSize,
   iconColor = colors.black,
   backgroundColor = colors.white,
+  loading = false,
   style,
 }: {
   icon: IconName;
@@ -20,19 +23,24 @@ export default function CircleButton({
   iconSize?: number;
   iconColor?: string;
   backgroundColor?: string;
+  loading?: boolean;
   style?: ViewStyle;
 }) {
   return (
     <Pressable
-      onPress={onPress}
+      onPress={loading ? undefined : onPress}
       hitSlop={12}
       style={({pressed}) => [
         styles.base,
         {width: size, height: size, borderRadius: size / 2, backgroundColor},
-        pressed && styles.pressed,
+        pressed && !loading && styles.pressed,
         style,
       ]}>
-      <Icon name={icon} size={iconSize ?? size * 0.4} color={iconColor} />
+      {loading ? (
+        <ActivityIndicator size="small" color={iconColor} />
+      ) : (
+        <Icon name={icon} size={iconSize ?? size * 0.4} color={iconColor} />
+      )}
     </Pressable>
   );
 }
