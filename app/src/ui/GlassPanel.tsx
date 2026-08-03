@@ -1,15 +1,14 @@
 import React from 'react';
 import {StyleSheet, View, ViewStyle} from 'react-native';
-import {BlurView} from '@react-native-community/blur';
 import {colors, radii} from './theme';
 
 /**
- * A frosted-glass panel for the Stark/JARVIS neon look: a real blur behind a
- * translucent fill and a luminous hairline border, so it reads as glass
- * floating over the art-tinted backdrop. The translucent fill means it still
- * looks glassy even if the native blur under-renders on a given device.
- * `neon` uses the neon-purple edge (default) vs a soft white edge; `glow` adds
- * a neon drop shadow.
+ * A holographic panel for the Stark/JARVIS look -- NOT frosted glass. A
+ * barely-there translucent fill lets the art-tinted backdrop show through
+ * (a projection floating in space), and the panel is defined by a GLOWING thin
+ * neon edge plus a faint top "sheen" line that reads as the projected upper
+ * edge. Clean, luminous, minimal. `neon` uses the neon edge (default) vs a soft
+ * white edge; `glow` adds the neon bloom.
  */
 export default function GlassPanel({
   children,
@@ -33,23 +32,16 @@ export default function GlassPanel({
         {
           borderRadius: radius,
           borderColor: neon ? colors.glassBorder : colors.glassBorderSoft,
+          backgroundColor: strong ? colors.glassFillStrong : colors.glassFill,
         },
         glow && styles.glow,
         style,
       ]}>
-      <BlurView
-        style={[StyleSheet.absoluteFill, {borderRadius: radius}]}
-        blurType="dark"
-        blurAmount={16}
-        reducedTransparencyFallbackColor={colors.surface}
-      />
+      {/* Faint top-edge highlight -- the "projected" upper rim of a hologram. */}
       <View
         style={[
-          StyleSheet.absoluteFill,
-          {
-            borderRadius: radius,
-            backgroundColor: strong ? colors.glassFillStrong : colors.glassFill,
-          },
+          styles.sheen,
+          {borderTopLeftRadius: radius, borderTopRightRadius: radius},
         ]}
       />
       <View style={styles.content}>{children}</View>
@@ -60,11 +52,19 @@ export default function GlassPanel({
 const styles = StyleSheet.create({
   wrap: {overflow: 'hidden', borderWidth: 1},
   content: {position: 'relative'},
+  sheen: {
+    position: 'absolute',
+    top: 0,
+    left: '6%',
+    right: '6%',
+    height: 1,
+    backgroundColor: colors.holoSheen,
+  },
   glow: {
     shadowColor: colors.neonGlow,
     shadowOpacity: 1,
-    shadowRadius: 16,
+    shadowRadius: 14,
     shadowOffset: {width: 0, height: 0},
-    elevation: 12,
+    elevation: 10,
   },
 });

@@ -16,6 +16,7 @@ import Animated, {
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
+  withRepeat,
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
@@ -48,7 +49,7 @@ import {VibeQueue} from '../engine/vibeQueue';
 import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
-import GlassPanel from '../ui/GlassPanel';
+import HoloFrame from '../ui/HoloFrame';
 import IconButton from '../ui/IconButton';
 import ListRow from '../ui/ListRow';
 import Thumbnail from '../ui/Thumbnail';
@@ -120,6 +121,17 @@ export default function PlayerScreen({navigation}: Props) {
   const [swipeDir, setSwipeDir] = useState<'left' | 'right' | null>(null);
   // Backdrop gradient derived from the current song's artwork (see hook).
   const artGradient = useArtGradient(song?.videoId);
+
+  // Gentle looping pulse for the play button's neon halo -- the "live hologram"
+  // heartbeat. Runs whenever this screen is mounted.
+  const pulse = useSharedValue(0);
+  useEffect(() => {
+    pulse.value = withRepeat(withTiming(1, {duration: 1600}), -1, true);
+  }, [pulse]);
+  const haloStyle = useAnimatedStyle(() => ({
+    opacity: 0.28 + pulse.value * 0.6,
+    transform: [{scale: 1 + pulse.value * 0.1}],
+  }));
 
   const progress = useProgress(500);
   const playbackState = usePlaybackState();
@@ -428,9 +440,9 @@ export default function PlayerScreen({navigation}: Props) {
                     : FadeIn.duration(200)
                 }
                 exiting={swipeDir === 'right' ? SlideOutRight.duration(200) : SlideOutLeft.duration(200)}>
-                <View style={styles.artFrame}>
-                  <Thumbnail videoId={song.videoId} size={ART_SIZE} radius={18} />
-                </View>
+                <HoloFrame radius={12} cornerSize={24} style={styles.artHolo}>
+                  <Thumbnail videoId={song.videoId} size={ART_SIZE} radius={6} />
+                </HoloFrame>
               </Animated.View>
             </View>
 
@@ -544,7 +556,7 @@ export default function PlayerScreen({navigation}: Props) {
             <Text style={styles.time}>{formatTime(duration)}</Text>
           </View>
 
-          <GlassPanel style={styles.transportPanel} radius={36} glow>
+          <HoloFrame style={styles.transportPanel} radius={12} cornerSize={20}>
             <View style={styles.controls}>
             {/* "shuffle-vibe": mirrors the lock/drift chip above in transport-row
                 position (matches the reference app's shuffle-prev-play-next-repeat
@@ -558,6 +570,7 @@ export default function PlayerScreen({navigation}: Props) {
             />
             <IconButton name="previous" size={30} onPress={handlePrev} />
             <View style={styles.playGlow}>
+              <Animated.View style={[styles.playHalo, haloStyle]} pointerEvents="none" />
               <CircleButton
                 icon={isPlaying ? 'pause' : 'play'}
                 size={72}
@@ -572,7 +585,7 @@ export default function PlayerScreen({navigation}: Props) {
                 toggle. */}
             <IconButton name="repeat" size={22} color={colors.textTertiary} disabled />
             </View>
-          </GlassPanel>
+          </HoloFrame>
 
           <Text style={styles.sectionLabel}>UP NEXT</Text>
           {isVibe ? (
@@ -634,11 +647,12 @@ const styles = StyleSheet.create({
   contextLabel: {
     flex: 1,
     textAlign: 'center',
-    color: colors.textTertiary,
-    fontSize: 12,
-    fontWeight: '600',
+    color: colors.neon,
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: 'monospace',
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    letterSpacing: 2,
     marginHorizontal: spacing.sm,
   },
   topBarSpacer: {width: 40},
@@ -652,8 +666,8 @@ const styles = StyleSheet.create({
     shadowOffset: {width: 0, height: 0},
     elevation: 16,
   },
-  // Luminous hairline frame hugging the artwork.
-  artFrame: {borderRadius: 20, borderWidth: 1.5, borderColor: colors.glassBorder},
+  // Padding so the system-window frame + corner brackets sit around the art.
+  artHolo: {padding: 10},
   info: {alignItems: 'center', marginTop: spacing.xl, width: '100%'},
   // Two lines of the title's line-height, so titles of any length occupy the
   // same vertical space and nothing below jumps between songs.
@@ -683,7 +697,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginTop: -spacing.xs,
   },
-  time: {color: colors.textTertiary, fontSize: 12},
+  time: {color: colors.textSecondary, fontSize: 11, fontFamily: 'monospace', letterSpacing: 1},
   transportPanel: {marginTop: spacing.lg, alignSelf: 'stretch'},
   controls: {
     flexDirection: 'row',
@@ -693,14 +707,28 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.lg,
   },
-  // Neon glow behind the play/pause button.
+  // Neon glow behind the play/pause button + its pulsing halo ring.
   playGlow: {
-    borderRadius: 40,
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    alignItems: 'center',
+    justifyContent: 'center',
     shadowColor: colors.neonGlow,
     shadowOpacity: 1,
     shadowRadius: 20,
     shadowOffset: {width: 0, height: 0},
     elevation: 14,
+  },
+  playHalo: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 46,
+    borderWidth: 1.5,
+    borderColor: colors.neon,
   },
   sectionLabel: {
     color: colors.textTertiary,

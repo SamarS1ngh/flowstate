@@ -2,9 +2,11 @@ import React from 'react';
 import {Pressable, StyleSheet, Text} from 'react-native';
 import {colors, radii, spacing} from './theme';
 
-// Rounded-full filter/mood chip, matching the reference app's chip cloud:
-// dark pill when inactive, white-bg/black-text when active. Used for
-// Library's Playlists/Songs filter and PlayerScreen's mood filter row.
+// Holographic chip: transparent with a faint glowing edge when inactive; when
+// active it lights up with a neon (or red, for a reject) glowing outline + soft
+// fill + coloured label -- reading as a lit holo toggle rather than a solid
+// pill. Used by Library's filter tabs, Playlist's vibe toggles, and the
+// Player's mood/mode/reject chips.
 export default function Chip({
   label,
   active = false,
@@ -14,23 +16,29 @@ export default function Chip({
   label: string;
   active?: boolean;
   onPress?: () => void;
-  // 'danger' tints an active chip red instead of white/accent -- used by
-  // PlayerScreen's "doesn't fit" pill so it reads as a reject action rather
-  // than a filter toggle even though it shares the same chip shape.
+  // 'danger' lights the active chip red (reject action) instead of neon.
   tone?: 'default' | 'accent' | 'danger';
 }) {
-  const activeBg =
-    tone === 'danger' ? colors.dangerBg : tone === 'accent' ? colors.accent : colors.chipActiveBg;
-  const activeText =
-    tone === 'danger' ? colors.danger : tone === 'accent' ? colors.accentText : colors.chipActiveText;
-  const activeBorder = tone === 'danger' ? colors.danger : 'transparent';
+  const isDanger = tone === 'danger';
+  const activeBorder = isDanger ? colors.danger : colors.neon;
+  const activeText = isDanger ? colors.danger : colors.neon;
+  const activeBg = isDanger ? colors.dangerBg : colors.accentSoft;
+  const activeGlow = isDanger ? colors.dangerGlow : colors.neonGlow;
 
   return (
     <Pressable
       onPress={onPress}
       style={({pressed}) => [
         styles.chip,
-        active && {backgroundColor: activeBg, borderColor: activeBorder},
+        active && {
+          backgroundColor: activeBg,
+          borderColor: activeBorder,
+          shadowColor: activeGlow,
+          shadowOpacity: 1,
+          shadowRadius: 9,
+          shadowOffset: {width: 0, height: 0},
+          elevation: 6,
+        },
         pressed && styles.pressed,
       ]}>
       <Text style={[styles.label, active && {color: activeText, fontWeight: '700'}]}>
@@ -42,15 +50,15 @@ export default function Chip({
 
 const styles = StyleSheet.create({
   chip: {
-    backgroundColor: colors.chipBg,
+    backgroundColor: 'transparent',
     borderWidth: 1,
-    borderColor: colors.chipBg,
+    borderColor: colors.glassBorderSoft,
     borderRadius: radii.pill,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.sm,
     marginRight: spacing.sm,
     marginBottom: spacing.sm,
   },
-  pressed: {opacity: 0.75},
-  label: {color: colors.textPrimary, fontSize: 13, fontWeight: '600'},
+  pressed: {opacity: 0.7},
+  label: {color: colors.textSecondary, fontSize: 13, fontWeight: '600'},
 });

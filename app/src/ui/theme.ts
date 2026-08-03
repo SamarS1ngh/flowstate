@@ -38,12 +38,15 @@ export const colors = {
   neon: '#c04dff',
   neonGlow: 'rgba(192,77,255,0.55)', // shadowColor for glow effects
 
-  // Glass surfaces -- translucent fills + luminous hairline borders that read as
-  // frosted panels floating over the art-tinted backdrop.
-  glassFill: 'rgba(255,255,255,0.06)',
-  glassFillStrong: 'rgba(255,255,255,0.10)',
-  glassBorder: 'rgba(192,77,255,0.35)', // neon-tinted edge
-  glassBorderSoft: 'rgba(255,255,255,0.14)',
+  // Holographic surfaces -- NOT frosted glass. Barely-there fills so the
+  // art-tinted backdrop shows through (a projection floating in space), defined
+  // almost entirely by a GLOWING thin neon edge. Clean, luminous, minimal.
+  glassFill: 'rgba(192,77,255,0.05)',
+  glassFillStrong: 'rgba(192,77,255,0.09)',
+  glassBorder: 'rgba(200,120,255,0.65)', // glowing neon edge
+  glassBorderSoft: 'rgba(255,255,255,0.20)',
+  holoLine: 'rgba(200,120,255,0.85)', // bright hairline for dividers/edges
+  holoSheen: 'rgba(255,255,255,0.14)', // faint top highlight (projected edge)
 
   // Kept as a sparkle highlight ONLY for the "magic" vibe-shuffle affordance.
   magic: '#f5c451',
