@@ -71,12 +71,28 @@ async function resolveWithRetry(song: Song): Promise<Stream> {
   }
 }
 
+// A stream resolve must never hang forever. RN's fetch has no default timeout,
+// so a stalled googlevideo/Innertube request (common under the many concurrent
+// requests rapid skips trigger) would otherwise wedge whatever awaited it -- and
+// that's exactly what stuck enqueueNext's `enqueuing` flag true permanently,
+// killing all future pre-buffering ("instant skip stops working"). Time-boxing
+// turns a hang into a normal failure: loadSingle retries the next candidate,
+// enqueueNext just bails and a later skip retries.
+const RESOLVE_TIMEOUT_MS = 15000;
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('resolve timed out')), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 // Offline-first stream resolution: a downloaded song plays straight from disk
 // (no network, no buffering wait). offlineUrl() self-heals a dangling row.
 async function resolveStream(song: Song): Promise<Stream> {
   const local = await offlineUrl(song.videoId);
   if (local) return {url: local};
-  return resolveWithRetry(song);
+  return withTimeout(resolveWithRetry(song), RESOLVE_TIMEOUT_MS);
 }
 
 async function resolveStreamSafe(song: Song): Promise<Stream | null> {
@@ -118,23 +134,33 @@ async function loadSingle(song: Song): Promise<void> {
 // if there's no next, one is already staged, or the resolve fails (the skip
 // fallback covers an unplayable/absent next). Best-effort and non-blocking.
 async function enqueueNext(): Promise<void> {
-  if (!source || enqueuing || enqueuedNextId) return;
+  if (!source || enqueuing || enqueuedNextId) {
+    return;
+  }
   const next = source.peekNext?.() ?? null;
-  if (!next || next.videoId === current?.videoId) return;
+  if (!next || next.videoId === current?.videoId) {
+    return;
+  }
   enqueuing = true;
   try {
     // Resolve OUTSIDE the serialize lock (it can take seconds) so it never
     // blocks a user skip; only the quick add() runs on the lock, re-checking
     // that the pick is still valid and no rebuild happened in between.
     const stream = await resolveStreamSafe(next);
-    if (!stream) return;
+    if (!stream) {
+      return;
+    }
     await serialize(async () => {
-      if (rebuilding || enqueuedNextId) return;
+      if (rebuilding || enqueuedNextId) {
+        return;
+      }
       if (next.videoId === current?.videoId) return;
       // The committed next may have changed while we resolved (reject / mood /
       // lock-drift toggle clears the vibe queue's pending pick).
       const still = source?.peekNext?.() ?? null;
-      if (!still || still.videoId !== next.videoId) return;
+      if (!still || still.videoId !== next.videoId) {
+        return;
+      }
       await TrackPlayer.add(toTrack(next, stream));
       enqueuedById.set(next.videoId, next);
       enqueuedNextId = next.videoId;
