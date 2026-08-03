@@ -147,6 +147,11 @@ export async function skipToNext(): Promise<void> {
   let candidate = source.next(current);
   let consecutiveFailures = 0;
   while (candidate) {
+    // Optimistic: reflect the picked song immediately so a swipe/skip updates
+    // the Player art + title RIGHT AWAY, with the network resolve happening
+    // after. load() re-affirms `current` when it completes.
+    current = candidate;
+    emitNowPlaying();
     try {
       await load(candidate);
       if (leaving) {
@@ -187,6 +192,8 @@ export async function skipToPrevious(): Promise<void> {
     await TrackPlayer.seekTo(0); // no history (session start) -> restart current
     return;
   }
+  current = prev; // optimistic: slide the art to the previous song immediately
+  emitNowPlaying();
   try {
     await load(prev); // load sets current=prev; do NOT push it onto history
   } catch {

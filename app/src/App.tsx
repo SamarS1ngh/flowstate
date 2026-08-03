@@ -247,7 +247,14 @@ function AppShell() {
           <Stack.Screen
             name="Player"
             component={PlayerScreen}
-            options={{headerShown: false}}
+            options={{
+              headerShown: false,
+              // A quick fade instead of the default ~350ms slide, so tapping a
+              // song / vibe shuffle changes the screen almost instantly rather
+              // than reading as a slow transition.
+              animation: 'fade',
+              animationDuration: 140,
+            }}
           />
           <Stack.Screen name="Settings" component={SettingsScreen} />
           <Stack.Screen
