@@ -9,37 +9,54 @@
 // consistent and easy to retune from one place.
 
 export const colors = {
-  // Backgrounds
-  bg: '#000000',
-  surface: '#141414', // rows, cards, headers
-  surfaceRaised: '#1f1f1f', // chips (inactive), mini player, inputs
-  surfacePressed: '#242424',
-  border: '#2a2a2a',
+  // Backgrounds -- near-black with subtle elevation (not flat #000 everywhere)
+  // so surfaces read as layered, which is most of what makes a dark UI feel
+  // premium rather than "developer default".
+  bg: '#08080b',
+  surface: '#141418', // rows, cards, headers
+  surfaceRaised: '#1e1e24', // chips (inactive), mini player, inputs
+  surfacePressed: '#2a2a32',
+  border: '#2a2a32',
 
   // Text
   textPrimary: '#ffffff',
-  textSecondary: '#aaaaaa',
-  textTertiary: '#767676',
+  textSecondary: '#b3b3bd',
+  textTertiary: '#7a7a86',
 
   // Chips / pills
-  chipBg: '#272727',
+  chipBg: '#26262e',
   chipActiveBg: '#ffffff',
   chipActiveText: '#0a0a0a',
 
-  // flowstate's own accent -- used sparingly, only for vibe-engine features
-  // (lock/drift, mood chips, progress emphasis) so the app still has an
-  // identity distinct from the reference app's pure black/white/red look.
-  accent: '#5b8def',
-  accentText: '#06101f',
+  // ONE accent -- a vibrant violet that carries the "vibe" identity across the
+  // whole app (lock/drift, mood chips, progress, active states). Unifies what
+  // used to be three competing colours (blue / gold / orange).
+  accent: '#8b5cf6',
+  accentDeep: '#6d3fd6', // gradient bottom / pressed accent
+  accentSoft: 'rgba(139,92,246,0.16)', // tinted fills behind accent content
+  accentText: '#0b0714',
+
+  // Kept as a sparkle highlight ONLY for the "magic" vibe-shuffle affordance.
+  magic: '#f5c451',
 
   // Status
-  danger: '#ef5b5b',
-  dangerBg: '#2a1616',
-  success: '#5bc98a',
+  danger: '#ff5c7a',
+  dangerBg: '#2a1620',
+  success: '#4dd0a0',
 
   white: '#ffffff',
   black: '#000000',
   overlay: 'rgba(0,0,0,0.6)',
+};
+
+// Reusable gradient stops (react-native-linear-gradient `colors` arrays). Used
+// for the Player backdrop, playlist headers, and scrims. Kept here so the whole
+// app pulls the same violet-into-black feel from one place.
+export const gradients: {playerBackdrop: string[]; scrimDown: string[]} = {
+  // Player / header backdrop: violet glow up top fading into the app bg.
+  playerBackdrop: ['#241a3d', '#120f1d', colors.bg],
+  // A soft top-down scrim to keep text legible over artwork.
+  scrimDown: ['rgba(8,8,11,0)', 'rgba(8,8,11,0.85)'],
 };
 
 export const spacing = {

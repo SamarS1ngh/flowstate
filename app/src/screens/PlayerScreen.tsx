@@ -1,5 +1,6 @@
 import React, {useCallback, useEffect, useMemo, useReducer, useRef, useState} from 'react';
 import {Alert, Dimensions, FlatList, StyleSheet, Text, View} from 'react-native';
+import LinearGradient from 'react-native-linear-gradient';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import {Gesture, GestureDetector} from 'react-native-gesture-handler';
@@ -48,7 +49,7 @@ import CircleButton from '../ui/CircleButton';
 import IconButton from '../ui/IconButton';
 import ListRow from '../ui/ListRow';
 import Thumbnail from '../ui/Thumbnail';
-import {colors, radii, spacing, thumbSize, type} from '../ui/theme';
+import {colors, gradients, radii, spacing, thumbSize, type} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Player'>;
 
@@ -375,6 +376,15 @@ export default function PlayerScreen({navigation}: Props) {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+      {/* Violet-into-black backdrop -- gives the now-playing screen depth
+          instead of flat black. Fades to the app bg by the lower third so the
+          transport/up-next sit on plain dark. */}
+      <LinearGradient
+        colors={gradients.playerBackdrop}
+        locations={[0, 0.4, 0.75]}
+        style={StyleSheet.absoluteFill}
+        pointerEvents="none"
+      />
       <Animated.View style={[styles.flexFill, screenAnimatedStyle]}>
         <GestureDetector gesture={panGesture}>
           <View style={styles.hero}>
