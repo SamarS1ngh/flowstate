@@ -92,15 +92,20 @@ async function resolveStreamSafe(song: Song): Promise<Stream | null> {
 // Throws if the song can't be resolved so callers can react. `rebuilding`
 // suppresses the driver for the track-changed events this triggers.
 async function loadSingle(song: Song): Promise<void> {
-  const stream = await resolveStream(song); // throws on failure
   rebuilding = true;
   try {
+    // Stop the OLD track FIRST -- before the (possibly multi-second) resolve --
+    // so its audio doesn't keep playing and its timer doesn't keep ticking
+    // while the screen already shows the new song. The player then sits empty
+    // (state None -> the transport shows the loading spinner, position 0:00)
+    // until the new stream is ready.
     await TrackPlayer.reset();
+    enqueuedById.clear();
+    enqueuedNextId = null;
+    const stream = await resolveStream(song); // throws on failure -> caller retries
     await TrackPlayer.add(toTrack(song, stream));
     await TrackPlayer.play();
-    enqueuedById.clear();
     enqueuedById.set(song.videoId, song);
-    enqueuedNextId = null;
     current = song;
     emitNowPlaying();
   } finally {
