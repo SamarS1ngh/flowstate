@@ -32,6 +32,7 @@ import {
   currentSource,
   consumeFallbackStatus,
   nowPlaying,
+  peekNextSong,
   peekUpcoming,
   playFrom,
   reportFallback,
@@ -47,6 +48,7 @@ import {VibeQueue} from '../engine/vibeQueue';
 import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
+import GlassPanel from '../ui/GlassPanel';
 import IconButton from '../ui/IconButton';
 import ListRow from '../ui/ListRow';
 import Thumbnail from '../ui/Thumbnail';
@@ -80,8 +82,14 @@ const FALLBACK_LABEL: Record<FallbackKind, string> = {
 // to the screen width (minus side padding) so it never overflows on a
 // narrower device -- there's a lot more content below it now (slider,
 // transport, Up Next) than the old layout had.
-const {width: SCREEN_WIDTH} = Dimensions.get('window');
-const ART_SIZE = Math.min(thumbSize.player, SCREEN_WIDTH - spacing.xxl * 2);
+const {width: SCREEN_WIDTH, height: SCREEN_HEIGHT} = Dimensions.get('window');
+// Height-aware so the whole player (art + info + chips + transport + up-next)
+// fits without overflowing/cutting off the controls on shorter screens.
+const ART_SIZE = Math.min(
+  thumbSize.player,
+  SCREEN_WIDTH - spacing.xxl * 2,
+  SCREEN_HEIGHT * 0.32,
+);
 
 const UP_NEXT_COUNT = 6;
 
@@ -207,12 +215,15 @@ export default function PlayerScreen({navigation}: Props) {
     fallbackStatus !== 'error';
   const isLock = src instanceof VibeQueue && src.label === 'vibe:lock';
 
-  // Up Next preview (Task: fill the emptiness). SimpleQueue's order is fully
-  // known ahead of time so it can be peeked without side effects; VibeQueue
-  // picks weighted-random on each next() call, so there is no honest
-  // deterministic list to show -- the section below falls back to a plain
-  // "vibe will choose" note for it instead of faking one (see
-  // QueueSource.peekUpcoming).
+  // Up Next: SimpleQueue's order is fully known, so peek several ahead. VibeQueue
+  // is generative, but it COMMITS one next pick (peekNextSong) -- so we can show
+  // that single real "coming up" song instead of a vague note. Recomputed on song
+  // change and whenever the vibe controls (mode/mood) change what's next.
+  const [vibeNext, setVibeNext] = useState<Song | null>(null);
+  useEffect(() => {
+    setVibeNext(isVibe ? peekNextSong() : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [song?.videoId, isVibe, isLock, selectedMood]);
   const upcoming = isVibe ? [] : peekUpcoming(UP_NEXT_COUNT);
 
   const onToggleLockDrift = () => {
@@ -408,6 +419,7 @@ export default function PlayerScreen({navigation}: Props) {
             <View style={styles.artWrap}>
               <Animated.View
                 key={song.videoId}
+                style={styles.artGlow}
                 entering={
                   swipeDir === 'left'
                     ? SlideInRight.duration(220)
@@ -416,7 +428,9 @@ export default function PlayerScreen({navigation}: Props) {
                     : FadeIn.duration(200)
                 }
                 exiting={swipeDir === 'right' ? SlideOutRight.duration(200) : SlideOutLeft.duration(200)}>
-                <Thumbnail videoId={song.videoId} size={ART_SIZE} radius={16} />
+                <View style={styles.artFrame}>
+                  <Thumbnail videoId={song.videoId} size={ART_SIZE} radius={18} />
+                </View>
               </Animated.View>
             </View>
 
@@ -520,7 +534,7 @@ export default function PlayerScreen({navigation}: Props) {
               onSlidingStart={onSlidingStart}
               onValueChange={setSeekPreview}
               onSlidingComplete={onSlidingComplete}
-              minimumTrackTintColor={colors.white}
+              minimumTrackTintColor={colors.neon}
               maximumTrackTintColor="transparent"
               thumbTintColor={colors.white}
             />
@@ -530,39 +544,51 @@ export default function PlayerScreen({navigation}: Props) {
             <Text style={styles.time}>{formatTime(duration)}</Text>
           </View>
 
-          <View style={styles.controls}>
+          <GlassPanel style={styles.transportPanel} radius={36} glow>
+            <View style={styles.controls}>
             {/* "shuffle-vibe": mirrors the lock/drift chip above in transport-row
                 position (matches the reference app's shuffle-prev-play-next-repeat
                 layout) -- dimmed/inert when there's no vibe queue to toggle. */}
             <IconButton
               name="shuffle"
               size={22}
-              color={isVibe ? (isLock ? colors.textTertiary : colors.accent) : colors.textTertiary}
+              color={isVibe ? (isLock ? colors.textTertiary : colors.neon) : colors.textTertiary}
               disabled={!isVibe}
               onPress={onToggleLockDrift}
             />
             <IconButton name="previous" size={30} onPress={handlePrev} />
-            <CircleButton
-              icon={isPlaying ? 'pause' : 'play'}
-              size={72}
-              loading={isLoading}
-              onPress={() => togglePlayPause()}
-            />
+            <View style={styles.playGlow}>
+              <CircleButton
+                icon={isPlaying ? 'pause' : 'play'}
+                size={72}
+                loading={isLoading}
+                onPress={() => togglePlayPause()}
+              />
+            </View>
             <IconButton name="next" size={30} onPress={handleNext} />
             {/* Repeat: decorative only -- no repeat-track/queue concept exists in
                 controller.ts/queue.ts, and this redesign doesn't invent new
                 playback logic. Rendered dimmed so it doesn't imply a working
                 toggle. */}
             <IconButton name="repeat" size={22} color={colors.textTertiary} disabled />
-          </View>
+            </View>
+          </GlassPanel>
 
           <Text style={styles.sectionLabel}>UP NEXT</Text>
           {isVibe ? (
-            <View style={styles.upNextEmpty}>
+            <View>
+              {vibeNext ? (
+                <ListRow
+                  videoId={vibeNext.videoId}
+                  title={vibeNext.title}
+                  subtitle={vibeNext.artist}
+                  thumbRadius={radii.sm}
+                />
+              ) : null}
               <Text style={styles.upNextHint}>
                 {isLock
-                  ? 'Locked -- vibe will keep replaying songs like this one'
-                  : 'Vibe will choose the next song based on your mood'}
+                  ? 'Locked — vibe keeps to songs like this'
+                  : 'Vibe picks each next song by your mood'}
               </Text>
             </View>
           ) : upcoming.length === 0 ? (
@@ -617,6 +643,17 @@ const styles = StyleSheet.create({
   },
   topBarSpacer: {width: 40},
   artWrap: {marginTop: spacing.lg},
+  // Neon glow cast around the album art (colored spot shadow on Android P+).
+  artGlow: {
+    borderRadius: 22,
+    shadowColor: colors.neonGlow,
+    shadowOpacity: 1,
+    shadowRadius: 26,
+    shadowOffset: {width: 0, height: 0},
+    elevation: 16,
+  },
+  // Luminous hairline frame hugging the artwork.
+  artFrame: {borderRadius: 20, borderWidth: 1.5, borderColor: colors.glassBorder},
   info: {alignItems: 'center', marginTop: spacing.xl, width: '100%'},
   // Two lines of the title's line-height, so titles of any length occupy the
   // same vertical space and nothing below jumps between songs.
@@ -647,13 +684,23 @@ const styles = StyleSheet.create({
     marginTop: -spacing.xs,
   },
   time: {color: colors.textTertiary, fontSize: 12},
+  transportPanel: {marginTop: spacing.lg, alignSelf: 'stretch'},
   controls: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     width: '100%',
-    marginTop: spacing.lg,
-    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+  },
+  // Neon glow behind the play/pause button.
+  playGlow: {
+    borderRadius: 40,
+    shadowColor: colors.neonGlow,
+    shadowOpacity: 1,
+    shadowRadius: 20,
+    shadowOffset: {width: 0, height: 0},
+    elevation: 14,
   },
   sectionLabel: {
     color: colors.textTertiary,

@@ -265,6 +265,13 @@ export function peekUpcoming(count: number): Song[] {
   return source?.peekUpcoming?.(count) ?? [];
 }
 
+// The single committed next song (what will actually play on the next skip),
+// used by the Player's Up Next -- including vibe mode, where the queue has no
+// deterministic full list but DOES commit one next pick (see VibeQueue.peekNext).
+export function peekNextSong(): Song | null {
+  return source?.peekNext?.() ?? null;
+}
+
 export async function togglePlayPause(): Promise<void> {
   const state = (await TrackPlayer.getPlaybackState()).state;
   if (state === State.Playing) await TrackPlayer.pause();

@@ -24,24 +24,34 @@ export const colors = {
   textTertiary: '#7a7a86',
 
   // Chips / pills
-  chipBg: '#26262e',
+  chipBg: 'rgba(255,255,255,0.07)',
   chipActiveBg: '#ffffff',
   chipActiveText: '#0a0a0a',
 
-  // ONE accent -- a vibrant violet that carries the "vibe" identity across the
-  // whole app (lock/drift, mood chips, progress, active states). Unifies what
-  // used to be three competing colours (blue / gold / orange).
-  accent: '#8b5cf6',
-  accentDeep: '#6d3fd6', // gradient bottom / pressed accent
-  accentSoft: 'rgba(139,92,246,0.16)', // tinted fills behind accent content
+  // Stark/JARVIS-flavoured neon-glass palette: white + NEON PURPLE (the "cyan"
+  // slot) + red, over frosted translucent glass. The neon carries every active
+  // state; red is reserved for destructive/alert.
+  accent: '#c04dff', // neon purple
+  accentDeep: '#7a1fd0', // gradient bottom / pressed
+  accentSoft: 'rgba(192,77,255,0.16)', // tinted fills behind accent content
   accentText: '#0b0714',
+  neon: '#c04dff',
+  neonGlow: 'rgba(192,77,255,0.55)', // shadowColor for glow effects
+
+  // Glass surfaces -- translucent fills + luminous hairline borders that read as
+  // frosted panels floating over the art-tinted backdrop.
+  glassFill: 'rgba(255,255,255,0.06)',
+  glassFillStrong: 'rgba(255,255,255,0.10)',
+  glassBorder: 'rgba(192,77,255,0.35)', // neon-tinted edge
+  glassBorderSoft: 'rgba(255,255,255,0.14)',
 
   // Kept as a sparkle highlight ONLY for the "magic" vibe-shuffle affordance.
   magic: '#f5c451',
 
-  // Status
-  danger: '#ff5c7a',
-  dangerBg: '#2a1620',
+  // Status -- Iron-Man red.
+  danger: '#ff3557',
+  dangerGlow: 'rgba(255,53,87,0.5)',
+  dangerBg: 'rgba(255,53,87,0.12)',
   success: '#4dd0a0',
 
   white: '#ffffff',
