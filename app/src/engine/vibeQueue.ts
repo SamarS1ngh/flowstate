@@ -120,15 +120,42 @@ export class VibeQueue implements QueueSource {
     silent: boolean,
   ): {song: VibeSong; kind: 'primary' | 'relaxed' | 'random'} | null {
     const primaryThreshold = this.mode === 'lock' ? LOCK_THRESHOLD : DRIFT_THRESHOLD;
-    let picked = this.attemptWeightedPick(center, primaryThreshold);
-    if (picked) return {song: picked, kind: 'primary'};
+    const primary = this.weightedCandidates(center, primaryThreshold);
+    // Use the tight (primary) pool only while it still offers a FRESH song --
+    // one not played within the recency horizon. If it's exhausted (empty, OR
+    // every eligible song was just played), relax the threshold to pull in new
+    // songs instead of cycling the same few. This is what stops lock + a narrow
+    // mood on a small analyzed library from looping 4-5 tracks forever.
+    if (primary.length > 0 && this.hasFreshCandidate(primary)) {
+      const s = samplePick(primary, this.rng);
+      if (s) return {song: s, kind: 'primary'};
+    }
     if (!silent) this.onFallback?.('relaxed');
-    picked = this.attemptWeightedPick(center, primaryThreshold - RELAX_DELTA);
-    if (picked) return {song: picked, kind: 'relaxed'};
+    const relaxed = this.weightedCandidates(center, primaryThreshold - RELAX_DELTA);
+    if (relaxed.length > 0 && this.hasFreshCandidate(relaxed)) {
+      const s = samplePick(relaxed, this.rng);
+      if (s) return {song: s, kind: 'relaxed'};
+    }
+    // No fresh option even after relaxing. Prefer any relaxed/primary candidate
+    // over a uniform-random jump -- a soft repeat still keeps the vibe.
+    if (relaxed.length > 0) {
+      const s = samplePick(relaxed, this.rng);
+      if (s) return {song: s, kind: 'relaxed'};
+    }
+    if (primary.length > 0) {
+      const s = samplePick(primary, this.rng);
+      if (s) return {song: s, kind: 'primary'};
+    }
     if (!silent) this.onFallback?.('random');
-    picked = this.randomFallback(center);
+    const picked = this.randomFallback(center);
     if (picked) return {song: picked, kind: 'random'};
     return null;
+  }
+
+  // A pool is "exhausted" when none of its songs are fresh -- i.e. every one was
+  // played within the recency horizon, so any pick would be a near-term repeat.
+  private hasFreshCandidate(weighted: Array<{item: VibeSong}>): boolean {
+    return weighted.some(w => this.songsSince(w.item.videoId) >= RECENCY_HORIZON);
   }
 
   reset(seed: Song): void {
@@ -199,12 +226,6 @@ export class VibeQueue implements QueueSource {
         feedbackBias(center.videoId, song.videoId, this.feedback, simTo),
       ),
     }));
-  }
-
-  private attemptWeightedPick(center: VibeSong, threshold: number): VibeSong | null {
-    const weighted = this.weightedCandidates(center, threshold);
-    if (weighted.length === 0) return null;
-    return samplePick(weighted, this.rng);
   }
 
   // Commit the actual next pick ahead of time so the controller can prefetch

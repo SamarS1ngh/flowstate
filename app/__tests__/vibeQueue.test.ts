@@ -142,6 +142,25 @@ describe('VibeQueue: fallbacks', () => {
     expect(onFallback).not.toHaveBeenCalledWith('random');
   });
 
+  test('auto-relax: an EXHAUSTED tight pool (all recently played) relaxes to a fresh song', () => {
+    // tight (cos 0.95) is lock-eligible; mid (cos 0.70) only passes the relaxed
+    // threshold. rng ~0.5 lands in the dominant weight -> the fresh song.
+    const tight = vsong('tight', [0.95, Math.sqrt(1 - 0.95 * 0.95)]);
+    const mid = vsong('mid', [0.7, Math.sqrt(1 - 0.7 * 0.7)]);
+    const onFallback = jest.fn();
+    const q = new VibeQueue(
+      center,
+      'lock',
+      baseDeps({songs: [center, tight, mid], rng: () => 0.5, onFallback}),
+    );
+    // First pick: tight is a fresh lock-eligible song -> stay in the tight pool.
+    expect(q.next(null)?.videoId).toBe('tight');
+    // Now the tight pool is exhausted (tight was just played) -> relax and pull
+    // in the fresh song instead of re-cycling 'tight'.
+    expect(q.next(null)?.videoId).toBe('mid');
+    expect(onFallback).toHaveBeenCalledWith('relaxed');
+  });
+
   test('random fallback: still empty after relaxing, falls back to uniform random over scope minus bans', () => {
     // cos = 0.3: fails both lock's 0.75 and the relaxed 0.65 threshold.
     const far = vsong('far', [0.3, Math.sqrt(1 - 0.3 * 0.3)]);
