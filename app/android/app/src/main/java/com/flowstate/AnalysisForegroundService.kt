@@ -36,6 +36,12 @@ class AnalysisForegroundService : Service() {
     // decode + TFLite). Without this, a locked screen dozes the CPU and the JS
     // analysis loop stalls until unlock. This keeps the CPU running.
     private var wakeLock: PowerManager.WakeLock? = null
+    // Wi-Fi lock held for the service's lifetime. When the screen turns off,
+    // Android puts Wi-Fi into power-save (and some OEMs drop the connection),
+    // which makes the "Wi-Fi only" analysis guard PAUSE the batch -- so analysis
+    // barely moves while locked. This keeps the Wi-Fi radio active so downloads
+    // keep flowing.
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -43,6 +49,7 @@ class AnalysisForegroundService : Service() {
         when (intent?.getStringExtra(EXTRA_ACTION)) {
             ACTION_STOP -> {
                 releaseWakeLock()
+                releaseWifiLock()
                 stopForegroundCompat()
                 stopSelf()
                 return START_NOT_STICKY
@@ -55,6 +62,7 @@ class AnalysisForegroundService : Service() {
                 // whole point of the native service.
                 startForegroundCompat(buildNotification(this, title, text))
                 acquireWakeLock()
+                acquireWifiLock()
             }
         }
         return START_STICKY
@@ -62,7 +70,32 @@ class AnalysisForegroundService : Service() {
 
     override fun onDestroy() {
         releaseWakeLock()
+        releaseWifiLock()
         super.onDestroy()
+    }
+
+    private fun acquireWifiLock() {
+        if (wifiLock?.isHeld == true) return
+        try {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE)
+                as? android.net.wifi.WifiManager ?: return
+            val mode =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                else
+                    @Suppress("DEPRECATION") android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            val wl = wm.createWifiLock(mode, "flowstate:analysis-wifi")
+            wl.setReferenceCounted(false)
+            wl.acquire()
+            wifiLock = wl
+        } catch (_: Exception) {
+            // Wi-Fi lock is best-effort; never crash the service over it.
+        }
+    }
+
+    private fun releaseWifiLock() {
+        wifiLock?.let { if (it.isHeld) it.release() }
+        wifiLock = null
     }
 
     private fun acquireWakeLock() {
