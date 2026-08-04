@@ -82,8 +82,8 @@ android {
         applicationId "com.flowstate"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 11
-        versionName "0.5.3-alpha"
+        versionCode 12
+        versionName "0.5.4-alpha"
     }
     signingConfigs {
         debug {
