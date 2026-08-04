@@ -12,7 +12,6 @@ import {
 import LinearGradient from 'react-native-linear-gradient';
 import {SafeAreaView, useSafeAreaInsets} from 'react-native-safe-area-context';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
-import {useArtGradient} from '../ui/useArtGradient';
 import type {RootStackParamList} from '../App';
 import {openVibesDb, VibesDb} from '../db/vibesDb';
 import {playFrom, reportFallback} from '../player/controller';
@@ -44,7 +43,7 @@ import HoloFrame from '../ui/HoloFrame';
 import IconButton from '../ui/IconButton';
 import ListRow from '../ui/ListRow';
 import {filterSongs} from '../library/search';
-import {colors, radii, spacing} from '../ui/theme';
+import {colors, gradients, radii, spacing} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Playlist'>;
 
@@ -290,10 +289,6 @@ export default function PlaylistScreen({route, navigation}: Props) {
     () => `${songs.length} song${songs.length === 1 ? '' : 's'} · ${analyzedCount} analyzed`,
     [songs.length, analyzedCount],
   );
-  // Header backdrop tinted by the playlist's first cover art (same look as the
-  // Player), so each playlist glows in its own colour.
-  const artGradient = useArtGradient(coverIds[0]);
-
   if (loading) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
@@ -304,10 +299,10 @@ export default function PlaylistScreen({route, navigation}: Props) {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      {/* Art-tinted backdrop behind the header, fading to the app bg by ~halfway
-          down so the song list sits on plain dark. */}
+      {/* Static HUD backdrop behind the header (same as the Player) -- flat dark
+          violet, not an album-colour wash, so it never tints the status bar. */}
       <LinearGradient
-        colors={artGradient}
+        colors={gradients.playerBackdrop}
         locations={[0, 0.28, 0.55]}
         style={styles.backdrop}
         pointerEvents="none"
