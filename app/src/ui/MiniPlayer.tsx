@@ -41,7 +41,7 @@ export default function MiniPlayer({onPress}: {onPress: () => void}) {
       </View>
       <IconButton
         name={isPlaying ? 'pause' : 'play'}
-        onPress={() => togglePlayPause()}
+        onPress={() => togglePlayPause(isPlaying)}
         size={18}
         color={colors.neon}
         hitSlop={8}

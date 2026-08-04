@@ -235,6 +235,17 @@ export default function PlayerScreen({navigation}: Props) {
   }, [src]);
 
   const isPlaying = playbackState.state === State.Playing;
+  // Optimistic play/pause: flip the icon the instant you tap, then let the real
+  // playback state reconcile -- so the button doesn't wait for the state event.
+  const [wantPlaying, setWantPlaying] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (wantPlaying !== null && isPlaying === wantPlaying) setWantPlaying(null);
+  }, [isPlaying, wantPlaying]);
+  const shownPlaying = wantPlaying ?? isPlaying;
+  const onTogglePlay = useCallback(() => {
+    setWantPlaying(!shownPlaying);
+    void togglePlayPause(shownPlaying); // pauses if currently playing, else plays
+  }, [shownPlaying]);
   // "Loading" = we have a target song (optimistic open / skip) but the audio
   // isn't actually playing yet -- it's still resolving or buffering. Show a
   // spinner on the transport button until it truly plays, so the first song
@@ -619,13 +630,13 @@ export default function PlayerScreen({navigation}: Props) {
             <View style={styles.playGlow}>
               <Animated.View style={[styles.playHalo, haloStyle]} pointerEvents="none" />
               <CircleButton
-                icon={isPlaying ? 'pause' : 'play'}
+                icon={shownPlaying ? 'pause' : 'play'}
                 size={56}
                 // Play triangle renders optically smaller than the pause bars at
                 // the same point size -- bump it so the two read equal.
-                iconSize={isPlaying ? 18 : 26}
+                iconSize={shownPlaying ? 18 : 26}
                 loading={isLoading}
-                onPress={() => togglePlayPause()}
+                onPress={onTogglePlay}
               />
             </View>
             <IconButton name="next" size={24} onPress={handleNext} />

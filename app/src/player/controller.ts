@@ -1,4 +1,4 @@
-import TrackPlayer, {RepeatMode, State} from 'react-native-track-player';
+import TrackPlayer, {RepeatMode} from 'react-native-track-player';
 import {Song} from '../types';
 import {resolveStreamUrl, StreamResolveError} from '../stream/resolver';
 import {offlineUrl} from '../offline/downloads';
@@ -406,9 +406,11 @@ export function activeVideoId(): string | null {
   return timeline[activePos]?.videoId ?? null;
 }
 
-export async function togglePlayPause(): Promise<void> {
-  const state = (await TrackPlayer.getPlaybackState()).state;
-  if (state === State.Playing) await TrackPlayer.pause();
+// The caller passes what it already knows the state to be (from its
+// usePlaybackState hook), so we DON'T pay an extra getPlaybackState() native
+// round-trip before acting -- that round-trip was the play/pause lag.
+export async function togglePlayPause(isPlaying: boolean): Promise<void> {
+  if (isPlaying) await TrackPlayer.pause();
   else await TrackPlayer.play();
 }
 
