@@ -37,7 +37,6 @@ export default function Chip({
           shadowOpacity: 1,
           shadowRadius: 9,
           shadowOffset: {width: 0, height: 0},
-          elevation: 6,
         },
         pressed && styles.pressed,
       ]}>
@@ -53,12 +52,21 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     borderWidth: 1,
     borderColor: colors.glassBorderSoft,
-    borderRadius: radii.pill,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
+    borderRadius: radii.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 2,
     marginRight: spacing.sm,
     marginBottom: spacing.sm,
   },
   pressed: {opacity: 0.7},
-  label: {color: colors.textSecondary, fontSize: 13, fontWeight: '600'},
+  // Mono, uppercase, tracked-out -- reads as a HUD toggle/register rather
+  // than a rounded social pill.
+  label: {
+    color: colors.textSecondary,
+    fontSize: 11,
+    fontFamily: 'monospace',
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
 });

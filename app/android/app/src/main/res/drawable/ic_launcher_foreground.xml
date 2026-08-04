@@ -1,0 +1,25 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- flowstate mark (W1): HUD corner-brackets framing a 4-hump flow wave.
+         Frame 24..84 (inside the adaptive safe zone); neon brackets, white wave. -->
+    <!-- corner brackets -->
+    <path android:strokeColor="#C85CFF" android:strokeWidth="5" android:strokeLineCap="round"
+        android:strokeLineJoin="round" android:fillColor="#00000000"
+        android:pathData="M36,24 L24,24 L24,36" />
+    <path android:strokeColor="#C85CFF" android:strokeWidth="5" android:strokeLineCap="round"
+        android:strokeLineJoin="round" android:fillColor="#00000000"
+        android:pathData="M72,24 L84,24 L84,36" />
+    <path android:strokeColor="#C85CFF" android:strokeWidth="5" android:strokeLineCap="round"
+        android:strokeLineJoin="round" android:fillColor="#00000000"
+        android:pathData="M24,72 L24,84 L36,84" />
+    <path android:strokeColor="#C85CFF" android:strokeWidth="5" android:strokeLineCap="round"
+        android:strokeLineJoin="round" android:fillColor="#00000000"
+        android:pathData="M84,72 L84,84 L72,84" />
+    <!-- 4-hump flow wave -->
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="5" android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M28,54 q6.5,-14 13,0 t13,0 t13,0 t13,0" />
+</vector>

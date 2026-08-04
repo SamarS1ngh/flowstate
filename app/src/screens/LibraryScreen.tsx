@@ -63,7 +63,6 @@ export default function LibraryScreen({navigation}: Props) {
   const [filter, setFilter] = useState<Filter>('playlists');
   const [search, setSearch] = useState('');
   const [batch, setBatch] = useState<BatchState | null>(null);
-  const [startingId, setStartingId] = useState<string | null>(null);
   // Prevents auto-sync from firing again every time this screen regains
   // focus in the same app session (e.g. navigating Library -> Player ->
   // back) once it has already tried once this mount -- a real failure still
@@ -193,17 +192,17 @@ export default function LibraryScreen({navigation}: Props) {
   // matches what the user sees. Mirrors PlaylistScreen's plain (non-vibe) tap
   // -- reuses the same exported playFrom/SimpleQueue, no new playback logic.
   const onPressSong = useCallback(
-    async (index: number) => {
+    (index: number) => {
       const song = visibleSongs[index];
-      setStartingId(song.videoId);
-      try {
-        await playFrom(new SimpleQueue(visibleSongs, index), song);
-        navigation.navigate('Player');
-      } catch (e) {
-        Alert.alert('Could not play song', e instanceof Error ? e.message : 'Unknown error');
-      } finally {
-        setStartingId(null);
-      }
+      // Navigate to the Player FIRST (instant) -- playFrom sets the now-playing
+      // song optimistically, so the Player shows it right away with a buffering
+      // state instead of waiting on the network resolve before the screen
+      // changes. Mirrors PlaylistScreen's tap. (Previously this awaited playFrom
+      // before navigating, so the first tap after a cold open felt laggy.)
+      navigation.navigate('Player');
+      void playFrom(new SimpleQueue(visibleSongs, index), song).catch(e =>
+        Alert.alert('Could not play song', e instanceof Error ? e.message : 'Unknown error'),
+      );
     },
     [visibleSongs, navigation],
   );
@@ -367,13 +366,7 @@ export default function LibraryScreen({navigation}: Props) {
               title={item.title}
               titleBadge={!item.hasVibe ? '♪?' : undefined}
               subtitle={item.artist}
-              disabled={startingId !== null}
               onPress={() => onPressSong(index)}
-              trailing={
-                startingId === item.videoId ? (
-                  <ActivityIndicator color={colors.accent} size="small" />
-                ) : undefined
-              }
             />
           )}
         />
@@ -394,15 +387,18 @@ function LibraryHeader({
   onSettings: () => void;
 }) {
   return (
-    <View style={styles.header}>
-      <Text style={styles.headerTitle}>Library</Text>
-      <View style={styles.headerActions}>
-        {loggedIn ? (
-          <IconButton name="sync" onPress={onSync} disabled={syncing} size={20} />
-        ) : null}
-        <IconButton name="settings" onPress={onSettings} size={20} />
+    <>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>◤ LIBRARY.SYS</Text>
+        <View style={styles.headerActions}>
+          {loggedIn ? (
+            <IconButton name="sync" onPress={onSync} disabled={syncing} size={20} />
+          ) : null}
+          <IconButton name="settings" onPress={onSettings} size={20} />
+        </View>
       </View>
-    </View>
+      <View style={styles.headerDivider} />
+    </>
   );
 }
 
@@ -505,8 +501,21 @@ const styles = StyleSheet.create({
     paddingTop: spacing.lg,
     paddingBottom: spacing.sm,
   },
-  headerTitle: {...type.display},
+  headerTitle: {
+    color: colors.neon,
+    fontFamily: 'monospace',
+    fontSize: 20,
+    fontWeight: '700',
+    letterSpacing: 2,
+  },
   headerActions: {flexDirection: 'row', alignItems: 'center'},
+  headerDivider: {
+    height: 1,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.xs,
+    backgroundColor: colors.glassBorder,
+    opacity: 0.7,
+  },
   chipRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -520,11 +529,13 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     paddingHorizontal: spacing.md,
     height: 40,
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: colors.glassFill,
     borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.glassBorderSoft,
   },
-  searchIcon: {color: colors.textTertiary, fontSize: 18, marginRight: spacing.sm},
-  searchInput: {flex: 1, color: colors.textPrimary, fontSize: 15, padding: 0},
+  searchIcon: {color: colors.neon, fontSize: 18, marginRight: spacing.sm},
+  searchInput: {flex: 1, color: colors.textPrimary, fontSize: 15, padding: 0, fontFamily: 'monospace'},
   searchClear: {color: colors.textTertiary, fontSize: 15, paddingLeft: spacing.sm},
   emptySearch: {
     color: colors.textSecondary,

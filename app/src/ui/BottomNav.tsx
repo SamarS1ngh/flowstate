@@ -26,13 +26,17 @@ export default function BottomNav({
 }) {
   return (
     <View style={styles.bar}>
+      {/* Bright neon top rail -- reads as the HUD's lower dock edge. */}
+      <View style={styles.rail} />
       {TABS.map(tab => {
         const isActive = tab.key === active;
-        const color = isActive ? colors.textPrimary : colors.textTertiary;
+        const color = isActive ? colors.neon : colors.textTertiary;
         return (
           <Pressable key={tab.key} style={styles.tab} onPress={() => onNavigate(tab.key)}>
+            {/* Active tab lights an upper tick + neon icon/label. */}
+            <View style={[styles.tick, isActive && styles.tickActive]} />
             <Icon name={tab.icon} size={20} color={color} />
-            <Text style={[styles.label, {color}]}>{tab.label}</Text>
+            <Text style={[styles.label, {color}]}>{tab.label.toUpperCase()}</Text>
           </Pressable>
         );
       })}
@@ -45,9 +49,23 @@ const styles = StyleSheet.create({
     height: bottomNavHeight,
     flexDirection: 'row',
     backgroundColor: colors.bg,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
+  },
+  rail: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: colors.glassBorder,
   },
   tab: {flex: 1, alignItems: 'center', justifyContent: 'center'},
-  label: {fontSize: 11, marginTop: 2, fontWeight: '600'},
+  tick: {width: 22, height: 2, borderRadius: 1, marginBottom: 6, backgroundColor: 'transparent'},
+  tickActive: {backgroundColor: colors.neon},
+  label: {
+    fontSize: 10,
+    marginTop: 3,
+    fontFamily: 'monospace',
+    fontWeight: '700',
+    letterSpacing: 1.5,
+  },
 });

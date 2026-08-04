@@ -33,18 +33,23 @@ export default function HoloFrame({
         styles.frame,
         {borderRadius: radius},
         glow && {
+          // iOS-only soft bloom. NO `elevation`: on Android elevation + a
+          // translucent background paints a sharp-cornered shadow rectangle
+          // behind the rounded frame (the "black box"). The neon border carries
+          // definition instead -- and reads far better in daylight.
           shadowColor: glowColor,
           shadowOpacity: 1,
           shadowRadius: 12,
           shadowOffset: {width: 0, height: 0},
-          elevation: 8,
         },
         style,
       ]}>
-      <View style={[styles.corner, styles.tl, corner]} pointerEvents="none" />
-      <View style={[styles.corner, styles.tr, corner]} pointerEvents="none" />
-      <View style={[styles.corner, styles.bl, corner]} pointerEvents="none" />
-      <View style={[styles.corner, styles.br, corner]} pointerEvents="none" />
+      {/* Corner brackets curve to match the frame radius so the panel isn't
+          curvy-border + pointy-corner at once. */}
+      <View style={[styles.corner, styles.tl, corner, {borderTopLeftRadius: radius}]} pointerEvents="none" />
+      <View style={[styles.corner, styles.tr, corner, {borderTopRightRadius: radius}]} pointerEvents="none" />
+      <View style={[styles.corner, styles.bl, corner, {borderBottomLeftRadius: radius}]} pointerEvents="none" />
+      <View style={[styles.corner, styles.br, corner, {borderBottomRightRadius: radius}]} pointerEvents="none" />
       {children}
     </View>
   );

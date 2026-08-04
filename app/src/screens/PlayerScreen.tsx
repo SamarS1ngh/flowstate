@@ -1,8 +1,16 @@
 import React, {useCallback, useEffect, useMemo, useReducer, useRef, useState} from 'react';
-import {Alert, Dimensions, FlatList, StyleSheet, Text, View} from 'react-native';
+import {
+  Alert,
+  Dimensions,
+  FlatList,
+  Modal,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import {SafeAreaView} from 'react-native-safe-area-context';
-import {useArtGradient} from '../ui/useArtGradient';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import {Gesture, GestureDetector} from 'react-native-gesture-handler';
 import Animated, {
@@ -30,13 +38,16 @@ import TrackPlayer, {
 } from 'react-native-track-player';
 import type {RootStackParamList} from '../App';
 import {
+  activeVideoId,
   currentSource,
   consumeFallbackStatus,
+  isRepeatOne,
   nowPlaying,
   peekNextSong,
   peekUpcoming,
   playFrom,
   reportFallback,
+  setRepeatOne as setRepeatOneCtl,
   skipToNext,
   skipToPrevious,
   subscribeNowPlaying,
@@ -50,6 +61,7 @@ import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
 import HoloFrame from '../ui/HoloFrame';
+import HudChrome from '../ui/HudChrome';
 import IconButton from '../ui/IconButton';
 import ListRow from '../ui/ListRow';
 import Thumbnail from '../ui/Thumbnail';
@@ -89,7 +101,7 @@ const {width: SCREEN_WIDTH, height: SCREEN_HEIGHT} = Dimensions.get('window');
 const ART_SIZE = Math.min(
   thumbSize.player,
   SCREEN_WIDTH - spacing.xxl * 2,
-  SCREEN_HEIGHT * 0.32,
+  SCREEN_HEIGHT * 0.25,
 );
 
 const UP_NEXT_COUNT = 6;
@@ -113,6 +125,9 @@ export default function PlayerScreen({navigation}: Props) {
   const [startingVibe, setStartingVibe] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekPreview, setSeekPreview] = useState(0);
+  // Latest playback position, kept in a ref so handlePrev can decide
+  // restart-vs-go-back without depending on (and re-creating on) every tick.
+  const positionRef = useRef(0);
   // Which way the art should slide in/out on the next song change -- set
   // right before calling skipToNext/skipToPrevious (by gesture or by the
   // transport buttons), consumed by the art's entering/exiting animation
@@ -120,7 +135,15 @@ export default function PlayerScreen({navigation}: Props) {
   // directional slide from nowhere.
   const [swipeDir, setSwipeDir] = useState<'left' | 'right' | null>(null);
   // Backdrop gradient derived from the current song's artwork (see hook).
-  const artGradient = useArtGradient(song?.videoId);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [repeatOne, setRepeatOne] = useState(isRepeatOne());
+  const onToggleRepeat = useCallback(() => {
+    setRepeatOne(prev => {
+      const next = !prev;
+      setRepeatOneCtl(next);
+      return next;
+    });
+  }, []);
 
   // Gentle looping pulse for the play button's neon halo -- the "live hologram"
   // heartbeat. Runs whenever this screen is mounted.
@@ -305,7 +328,14 @@ export default function PlayerScreen({navigation}: Props) {
   }, []);
   const handlePrev = useCallback(() => {
     setSwipeDir('right');
-    skipToPrevious();
+    // First press restarts the current song (bring it back to 0); only go to the
+    // previous song when you're already near the start. Lets you reset a song
+    // with "previous" without leaving it.
+    if (positionRef.current > 3) {
+      void TrackPlayer.seekTo(0);
+    } else {
+      skipToPrevious();
+    }
   }, []);
 
   const dismiss = useCallback(() => navigation.goBack(), [navigation]);
@@ -395,10 +425,18 @@ export default function PlayerScreen({navigation}: Props) {
     );
   }
 
-  const duration = progress.duration > 0 ? progress.duration : 0;
+  // "Settled" = the song shown is the one actually loaded/playing. While a skip's
+  // song is still loading (optimistic flip ahead of the load), snap the progress
+  // bar to 0 and use the song's own duration, so the loader visibly resets before
+  // the track switches -- instead of briefly showing the previous song's time.
+  const settled = song != null && song.videoId === activeVideoId();
+  const rawDuration = progress.duration > 0 ? progress.duration : 0;
+  const duration = settled ? rawDuration : song?.durationS ?? 0;
   const sliderMax = duration > 0 ? duration : 1;
-  const displayPosition = isSeeking ? seekPreview : progress.position;
-  const bufferedValue = Math.min(progress.buffered, sliderMax);
+  const displayPosition = isSeeking ? seekPreview : settled ? progress.position : 0;
+  const bufferedValue = settled ? Math.min(progress.buffered, sliderMax) : 0;
+  // Latest live position, read by handlePrev without re-creating the callback.
+  positionRef.current = settled ? progress.position : 0;
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
@@ -406,27 +444,25 @@ export default function PlayerScreen({navigation}: Props) {
           instead of flat black. Fades to the app bg by the lower third so the
           transport/up-next sit on plain dark. */}
       <LinearGradient
-        colors={artGradient}
+        colors={gradients.playerBackdrop}
         locations={[0, 0.4, 0.78]}
         style={StyleSheet.absoluteFill}
         pointerEvents="none"
       />
+      <HudChrome />
       <Animated.View style={[styles.flexFill, screenAnimatedStyle]}>
         <GestureDetector gesture={panGesture}>
           <View style={styles.hero}>
-            <View style={styles.topBar}>
-              <IconButton name="chevronDown" size={26} onPress={() => navigation.goBack()} />
-              <Text style={styles.contextLabel} numberOfLines={1}>
-                {isVibe ? (isLock ? 'Vibe · Lock' : 'Vibe · Drift') : `Playing from ${src?.label ?? 'queue'}`}
-              </Text>
-              {/* Balances the chevron-down button's width so the label above
-                  stays visually centered -- no 3-dot menu here on purpose:
-                  there's nothing real to put in one (no "go to playlist"
-                  context is tracked by the controller, and this redesign
-                  doesn't invent playback/navigation features to fill a
-                  dead icon). */}
-              <View style={styles.topBarSpacer} />
+            {/* HUD status strip -- reads as a terminal header, not an app bar. */}
+            <View style={styles.statusStrip}>
+              <IconButton name="chevronDown" size={22} onPress={() => navigation.goBack()} />
+              <Text style={styles.sysId}>FLOWSTATE.AUDIO_SYS</Text>
+              <View style={styles.statusRight}>
+                <View style={styles.liveDot} />
+                <Text style={styles.liveText}>LIVE</Text>
+              </View>
             </View>
+            <View style={styles.hudDivider} />
 
             <View style={styles.artWrap}>
               <Animated.View
@@ -440,23 +476,34 @@ export default function PlayerScreen({navigation}: Props) {
                     : FadeIn.duration(200)
                 }
                 exiting={swipeDir === 'right' ? SlideOutRight.duration(200) : SlideOutLeft.duration(200)}>
-                <HoloFrame radius={12} cornerSize={24} style={styles.artHolo}>
-                  <Thumbnail videoId={song.videoId} size={ART_SIZE} radius={6} />
+                <HoloFrame radius={20} cornerSize={24} style={styles.artHolo}>
+                  <Thumbnail videoId={song.videoId} size={ART_SIZE} radius={12} />
+                  <View style={styles.artTag}>
+                    <Text style={styles.artTagText}>
+                      {isVibe ? (isLock ? 'VIBE·LOCK' : 'VIBE·DRIFT') : 'QUEUE'}
+                    </Text>
+                  </View>
                 </HoloFrame>
               </Animated.View>
             </View>
 
-            <View style={styles.info}>
-              {/* Fixed-height title box (always 2 lines tall) so a 1-line vs
-                  2-line song title doesn't shift everything below it. */}
-              <View style={styles.titleWrap}>
-                <Text style={styles.title} numberOfLines={2}>
-                  {song.title}
+            {/* Terminal-style metadata readout (labelled, mono, left-aligned)
+                -- fixed 2-line title height so it never shifts the layout. */}
+            <View style={styles.readout}>
+              <View style={styles.readRow}>
+                <Text style={styles.readLabel}>TRACK</Text>
+                <View style={styles.readTitleWrap}>
+                  <Text style={styles.readTitle} numberOfLines={2}>
+                    {song.title}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.readRowLast}>
+                <Text style={styles.readLabel}>ARTIST</Text>
+                <Text style={styles.readValue} numberOfLines={1}>
+                  {song.artist}
                 </Text>
               </View>
-              <Text style={styles.artist} numberOfLines={1}>
-                {song.artist}
-              </Text>
             </View>
 
             {fallbackStatus === 'error' ? (
@@ -534,8 +581,10 @@ export default function PlayerScreen({navigation}: Props) {
               minimumValue={0}
               maximumValue={sliderMax}
               value={bufferedValue}
-              minimumTrackTintColor={colors.textTertiary}
-              maximumTrackTintColor={colors.chipBg}
+              // buffered = bright gray; unplayed (past playhead) = clearly
+              // visible gray, not the near-invisible faint line it was.
+              minimumTrackTintColor="rgba(255,255,255,0.85)"
+              maximumTrackTintColor="rgba(255,255,255,0.50)"
               thumbTintColor="transparent"
             />
             <Slider
@@ -556,62 +605,114 @@ export default function PlayerScreen({navigation}: Props) {
             <Text style={styles.time}>{formatTime(duration)}</Text>
           </View>
 
-          <HoloFrame style={styles.transportPanel} radius={12} cornerSize={20}>
+          <HoloFrame style={styles.transportPanel} radius={22} cornerSize={18}>
             <View style={styles.controls}>
             {/* "shuffle-vibe": mirrors the lock/drift chip above in transport-row
                 position (matches the reference app's shuffle-prev-play-next-repeat
                 layout) -- dimmed/inert when there's no vibe queue to toggle. */}
             <IconButton
               name="shuffle"
-              size={22}
-              color={isVibe ? (isLock ? colors.textTertiary : colors.neon) : colors.textTertiary}
+              size={isVibe && !isLock ? 25 : 22}
+              color={isVibe ? (isLock ? colors.textSecondary : colors.neon) : colors.textTertiary}
               disabled={!isVibe}
               onPress={onToggleLockDrift}
             />
-            <IconButton name="previous" size={30} onPress={handlePrev} />
+            <IconButton name="previous" size={24} onPress={handlePrev} />
             <View style={styles.playGlow}>
               <Animated.View style={[styles.playHalo, haloStyle]} pointerEvents="none" />
               <CircleButton
                 icon={isPlaying ? 'pause' : 'play'}
-                size={72}
+                size={56}
+                // Play triangle renders optically smaller than the pause bars at
+                // the same point size -- bump it so the two read equal.
+                iconSize={isPlaying ? 18 : 26}
                 loading={isLoading}
                 onPress={() => togglePlayPause()}
               />
             </View>
-            <IconButton name="next" size={30} onPress={handleNext} />
-            {/* Repeat: decorative only -- no repeat-track/queue concept exists in
-                controller.ts/queue.ts, and this redesign doesn't invent new
-                playback logic. Rendered dimmed so it doesn't imply a working
-                toggle. */}
-            <IconButton name="repeat" size={22} color={colors.textTertiary} disabled />
+            <IconButton name="next" size={24} onPress={handleNext} />
+            {/* Repeat-one: real toggle -- when on, a track that ends replays
+                instead of advancing (see controller.handleQueueEnded). Lit neon
+                + larger when armed. */}
+            <IconButton
+              name="repeat"
+              size={repeatOne ? 25 : 22}
+              color={repeatOne ? colors.neon : colors.textSecondary}
+              onPress={onToggleRepeat}
+            />
             </View>
           </HoloFrame>
 
-          <Text style={styles.sectionLabel}>UP NEXT</Text>
+          {/* Collapsed UP.NEXT register -- a tappable rounded panel that unfolds
+              into a half-screen scrollable queue sheet. */}
+          {(() => {
+            const preview = isVibe ? vibeNext : upcoming[0] ?? null;
+            const count = isVibe ? (vibeNext ? 1 : 0) : upcoming.length;
+            return (
+              <Pressable
+                style={({pressed}) => [styles.upNextBar, pressed && styles.upNextBarPressed]}
+                onPress={() => setQueueOpen(true)}>
+                <View style={styles.upNextBarBrL} />
+                <View style={styles.upNextBarBrR} />
+                <Text style={styles.upNextBarLabel}>◤ UP.NEXT</Text>
+                <View style={styles.upNextBarMid}>
+                  {preview ? (
+                    <Text style={styles.upNextBarTitle} numberOfLines={1}>
+                      ▸ {preview.title}
+                    </Text>
+                  ) : (
+                    <Text style={styles.upNextBarEmpty} numberOfLines={1}>
+                      {isVibe ? (isLock ? 'LOCKED · LIKE THIS' : 'DRIFT · BY MOOD') : 'END OF QUEUE'}
+                    </Text>
+                  )}
+                </View>
+                <Text style={styles.upNextBarCount}>
+                  {count > 0 ? `[${count > 99 ? '99+' : count}]` : ''} ▲
+                </Text>
+              </Pressable>
+            );
+          })()}
+        </View>
+      </Animated.View>
+
+      <Modal
+        visible={queueOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setQueueOpen(false)}>
+        <Pressable style={styles.sheetBackdrop} onPress={() => setQueueOpen(false)} />
+        <View style={styles.sheet}>
+          <View style={styles.sheetCornerTL} />
+          <View style={styles.sheetCornerTR} />
+          <View style={styles.sheetHeader}>
+            <Text style={styles.sheetTitle}>◤ UP.NEXT.QUEUE</Text>
+            <IconButton name="chevronDown" size={24} onPress={() => setQueueOpen(false)} />
+          </View>
+          <View style={styles.hudDivider} />
           {isVibe ? (
-            <View>
+            <View style={styles.sheetBody}>
               {vibeNext ? (
                 <ListRow
                   videoId={vibeNext.videoId}
                   title={vibeNext.title}
                   subtitle={vibeNext.artist}
-                  thumbRadius={radii.sm}
+                  thumbRadius={radii.md}
                 />
               ) : null}
-              <Text style={styles.upNextHint}>
+              <Text style={styles.sheetHint}>
                 {isLock
-                  ? 'Locked — vibe keeps to songs like this'
-                  : 'Vibe picks each next song by your mood'}
+                  ? 'LOCK MODE — vibe keeps to songs like the current one. The full queue is decided one song ahead.'
+                  : 'DRIFT MODE — vibe picks each next song live from your mood, so only the next track is committed.'}
               </Text>
             </View>
           ) : upcoming.length === 0 ? (
-            <View style={styles.upNextEmpty}>
-              <Text style={styles.upNextHint}>End of queue</Text>
+            <View style={styles.sheetBody}>
+              <Text style={styles.sheetHint}>END OF QUEUE</Text>
             </View>
           ) : (
             <FlatList
-              style={styles.upNextList}
-              contentContainerStyle={styles.upNextContent}
+              style={styles.sheetList}
+              contentContainerStyle={styles.sheetListContent}
               data={upcoming}
               keyExtractor={item => item.videoId}
               renderItem={({item}) => (
@@ -619,13 +720,13 @@ export default function PlayerScreen({navigation}: Props) {
                   videoId={item.videoId}
                   title={item.title}
                   subtitle={item.artist}
-                  thumbRadius={radii.sm}
+                  thumbRadius={radii.md}
                 />
               )}
             />
           )}
         </View>
-      </Animated.View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -637,6 +738,85 @@ const styles = StyleSheet.create({
   emptyTopBar: {paddingHorizontal: spacing.md, paddingTop: spacing.xs},
   emptyText: {color: colors.textSecondary, fontSize: 16},
   hero: {alignItems: 'center', paddingHorizontal: spacing.xl},
+  // HUD status strip + terminal readout
+  statusStrip: {flexDirection: 'row', alignItems: 'center', width: '100%', paddingTop: spacing.xs},
+  sysId: {
+    flex: 1,
+    color: colors.neon,
+    fontFamily: 'monospace',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1.5,
+    marginLeft: spacing.sm,
+  },
+  statusRight: {flexDirection: 'row', alignItems: 'center'},
+  liveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.neon,
+    marginRight: spacing.xs,
+    shadowColor: colors.neonGlow,
+    shadowOpacity: 1,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  liveText: {
+    color: colors.textSecondary,
+    fontFamily: 'monospace',
+    fontSize: 10,
+    letterSpacing: 1.5,
+    fontWeight: '700',
+  },
+  hudDivider: {
+    height: 1,
+    alignSelf: 'stretch',
+    backgroundColor: colors.glassBorder,
+    marginTop: spacing.xs,
+    marginBottom: spacing.sm,
+    opacity: 0.6,
+  },
+  artTag: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    backgroundColor: 'rgba(8,8,11,0.72)',
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 3,
+  },
+  artTagText: {
+    color: colors.neon,
+    fontFamily: 'monospace',
+    fontSize: 9,
+    letterSpacing: 1,
+    fontWeight: '700',
+  },
+  readout: {alignSelf: 'stretch', marginTop: spacing.md},
+  readRow: {flexDirection: 'row', alignItems: 'flex-start', marginBottom: spacing.sm},
+  readRowLast: {flexDirection: 'row', alignItems: 'flex-start'},
+  readLabel: {
+    width: 54,
+    color: colors.textTertiary,
+    fontFamily: 'monospace',
+    fontSize: 10,
+    letterSpacing: 1,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  readTitleWrap: {flex: 1, height: 18 * 2, justifyContent: 'flex-start'},
+  readTitle: {color: colors.white, fontFamily: 'monospace', fontSize: 13, fontWeight: '700', lineHeight: 18},
+  readValue: {flex: 1, color: colors.textPrimary, fontFamily: 'monospace', fontSize: 12, lineHeight: 16},
+  readValueNeon: {
+    flex: 1,
+    color: colors.neon,
+    fontFamily: 'monospace',
+    fontSize: 14,
+    letterSpacing: 1,
+    lineHeight: 20,
+  },
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -660,11 +840,11 @@ const styles = StyleSheet.create({
   // Neon glow cast around the album art (colored spot shadow on Android P+).
   artGlow: {
     borderRadius: 22,
+    // iOS-only bloom; no `elevation` (Android would draw a sharp shadow box).
     shadowColor: colors.neonGlow,
     shadowOpacity: 1,
     shadowRadius: 26,
     shadowOffset: {width: 0, height: 0},
-    elevation: 16,
   },
   // Padding so the system-window frame + corner brackets sit around the art.
   artHolo: {padding: 10},
@@ -698,27 +878,27 @@ const styles = StyleSheet.create({
     marginTop: -spacing.xs,
   },
   time: {color: colors.textSecondary, fontSize: 11, fontFamily: 'monospace', letterSpacing: 1},
-  transportPanel: {marginTop: spacing.lg, alignSelf: 'stretch'},
+  transportPanel: {marginTop: spacing.md, alignSelf: 'stretch'},
   controls: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     width: '100%',
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.sm,
     paddingHorizontal: spacing.lg,
   },
   // Neon glow behind the play/pause button + its pulsing halo ring.
   playGlow: {
-    width: 92,
-    height: 92,
-    borderRadius: 46,
+    width: 74,
+    height: 74,
+    borderRadius: 37,
     alignItems: 'center',
     justifyContent: 'center',
+    // iOS-only bloom; no `elevation` (Android would draw a sharp shadow box).
     shadowColor: colors.neonGlow,
     shadowOpacity: 1,
     shadowRadius: 20,
     shadowOffset: {width: 0, height: 0},
-    elevation: 14,
   },
   playHalo: {
     position: 'absolute',
@@ -726,20 +906,138 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    borderRadius: 46,
+    borderRadius: 37,
     borderWidth: 1.5,
     borderColor: colors.neon,
   },
   sectionLabel: {
-    color: colors.textTertiary,
-    fontSize: 12,
+    color: colors.neon,
+    fontFamily: 'monospace',
+    fontSize: 11,
     fontWeight: '700',
-    letterSpacing: 0.5,
-    marginTop: spacing.xl,
-    marginBottom: spacing.xs,
+    letterSpacing: 1.5,
+    marginTop: spacing.sm,
+    marginBottom: spacing.sm,
   },
   upNextEmpty: {paddingVertical: spacing.lg},
-  upNextHint: {color: colors.textTertiary, fontSize: 13, textAlign: 'center'},
+  upNextHint: {color: colors.textTertiary, fontSize: 13},
+  upNextMono: {flexDirection: 'row', alignItems: 'center'},
+  upNextArrow: {color: colors.neon, fontSize: 16, marginRight: spacing.sm},
+  upNextMonoText: {flex: 1},
+  upNextMonoTitle: {color: colors.white, fontFamily: 'monospace', fontSize: 14, fontWeight: '700'},
+  upNextMonoArtist: {color: colors.textSecondary, fontFamily: 'monospace', fontSize: 12, marginTop: 1},
   upNextList: {flex: 1},
   upNextContent: {paddingBottom: spacing.xxl},
+  // Collapsed UP.NEXT bar (tap to unfold the queue sheet)
+  upNextBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    marginTop: spacing.sm,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
+    backgroundColor: colors.glassFill,
+    overflow: 'hidden',
+  },
+  upNextBarPressed: {opacity: 0.75},
+  upNextBarBrL: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    width: 12,
+    height: 12,
+    borderTopWidth: 2,
+    borderLeftWidth: 2,
+    borderColor: colors.neon,
+    borderTopLeftRadius: radii.lg,
+  },
+  upNextBarBrR: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    width: 12,
+    height: 12,
+    borderBottomWidth: 2,
+    borderRightWidth: 2,
+    borderColor: colors.neon,
+    borderBottomRightRadius: radii.lg,
+  },
+  upNextBarLabel: {
+    color: colors.neon,
+    fontFamily: 'monospace',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1.5,
+  },
+  upNextBarMid: {flex: 1, marginHorizontal: spacing.md},
+  upNextBarTitle: {color: colors.white, fontFamily: 'monospace', fontSize: 12, fontWeight: '700'},
+  upNextBarEmpty: {color: colors.textTertiary, fontFamily: 'monospace', fontSize: 11, letterSpacing: 1},
+  upNextBarCount: {color: colors.neon, fontFamily: 'monospace', fontSize: 12, fontWeight: '700', letterSpacing: 1},
+  // Half-screen unfoldable queue sheet
+  sheetBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(4,4,7,0.72)',
+  },
+  sheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: SCREEN_HEIGHT * 0.55,
+    backgroundColor: '#0c0a14',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderTopWidth: 1,
+    borderColor: colors.glassBorder,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.lg,
+  },
+  sheetCornerTL: {
+    position: 'absolute',
+    top: -1,
+    left: -1,
+    width: 28,
+    height: 28,
+    borderTopWidth: 2,
+    borderLeftWidth: 2,
+    borderColor: colors.neon,
+    borderTopLeftRadius: 24,
+  },
+  sheetCornerTR: {
+    position: 'absolute',
+    top: -1,
+    right: -1,
+    width: 28,
+    height: 28,
+    borderTopWidth: 2,
+    borderRightWidth: 2,
+    borderColor: colors.neon,
+    borderTopRightRadius: 24,
+  },
+  sheetHeader: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'},
+  sheetTitle: {
+    color: colors.neon,
+    fontFamily: 'monospace',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 1.5,
+  },
+  sheetBody: {paddingTop: spacing.md},
+  sheetHint: {
+    color: colors.textSecondary,
+    fontFamily: 'monospace',
+    fontSize: 12,
+    lineHeight: 18,
+    letterSpacing: 0.5,
+    marginTop: spacing.md,
+  },
+  sheetList: {flex: 1},
+  sheetListContent: {paddingBottom: spacing.xxxl, paddingTop: spacing.xs},
 });

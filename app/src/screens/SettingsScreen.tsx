@@ -10,15 +10,17 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import {SafeAreaView} from 'react-native-safe-area-context';
 import * as RNFS from '@dr.pogodin/react-native-fs';
 import {pick, keepLocalCopy, types} from '@react-native-documents/picker';
 import {useFocusEffect} from '@react-navigation/native';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
+import IconButton from '../ui/IconButton';
 import {importVibesDb} from '../db/vibesDb';
 import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
 import {getStorageInfo, removeAllDownloads} from '../offline/downloads';
-import {colors, radii, spacing, type} from '../ui/theme';
+import {colors, radii, spacing} from '../ui/theme';
 import {analyzeEmbeddingAndMoods} from '../analyze/tflite';
 import {
   isAutoAnalyzeEnabled,
@@ -350,9 +352,15 @@ export default function SettingsScreen({navigation}: Props) {
   };
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}>
+    <SafeAreaView style={styles.screen} edges={['top']}>
+      <View style={styles.header}>
+        <IconButton name="chevronBack" size={26} onPress={() => navigation.goBack()} />
+        <Text style={styles.headerTitle}>◤ SETTINGS.SYS</Text>
+      </View>
+      <View style={styles.headerDivider} />
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={styles.content}>
       <View style={styles.section}>
         <View style={styles.toggleRow}>
           <View style={styles.toggleTextCol}>
@@ -365,7 +373,8 @@ export default function SettingsScreen({navigation}: Props) {
           <Switch
             value={autoAnalyze}
             onValueChange={onToggleAutoAnalyze}
-            trackColor={{true: colors.accent, false: colors.surfaceRaised}}
+            trackColor={{true: colors.neon, false: colors.surfaceRaised}}
+            thumbColor={colors.white}
           />
         </View>
         <View style={[styles.toggleRow, {marginTop: spacing.lg}]}>
@@ -379,7 +388,8 @@ export default function SettingsScreen({navigation}: Props) {
           <Switch
             value={wifiOnly}
             onValueChange={onToggleWifiOnly}
-            trackColor={{true: colors.accent, false: colors.surfaceRaised}}
+            trackColor={{true: colors.neon, false: colors.surfaceRaised}}
+            thumbColor={colors.white}
           />
         </View>
         <View style={[styles.toggleRow, {marginTop: spacing.lg}]}>
@@ -393,7 +403,8 @@ export default function SettingsScreen({navigation}: Props) {
           <Switch
             value={pauseLowBattery}
             onValueChange={onTogglePauseLowBattery}
-            trackColor={{true: colors.accent, false: colors.surfaceRaised}}
+            trackColor={{true: colors.neon, false: colors.surfaceRaised}}
+            thumbColor={colors.white}
           />
         </View>
       </View>
@@ -588,43 +599,93 @@ export default function SettingsScreen({navigation}: Props) {
           </Pressable>
         </View>
       )}
-    </ScrollView>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  screen: {flex: 1, backgroundColor: colors.bg},
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.sm,
+  },
+  headerTitle: {
+    color: colors.neon,
+    fontFamily: 'monospace',
+    fontSize: 20,
+    fontWeight: '700',
+    letterSpacing: 2,
+    marginLeft: spacing.sm,
+  },
+  headerDivider: {
+    height: 1,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+    backgroundColor: colors.glassBorder,
+    opacity: 0.7,
+  },
   container: {flex: 1, backgroundColor: colors.bg},
   content: {padding: spacing.lg, paddingBottom: spacing.xxxl},
+  // HUD panel: translucent fill + glowing soft edge, not an opaque card.
   section: {
     marginBottom: spacing.xl,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.glassFill,
     borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: colors.glassBorderSoft,
     padding: spacing.lg,
   },
-  sectionTitle: {...type.headline, marginBottom: spacing.xs},
+  sectionTitle: {
+    color: colors.textPrimary,
+    fontFamily: 'monospace',
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    marginBottom: spacing.xs,
+  },
   sectionBody: {color: colors.textSecondary, fontSize: 14, marginBottom: spacing.lg, lineHeight: 20},
   toggleRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'},
   toggleTextCol: {flex: 1, paddingRight: spacing.lg},
   toggleDesc: {color: colors.textSecondary, fontSize: 13, lineHeight: 18},
   input: {
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.glassBorderSoft,
     borderRadius: radii.md,
     color: colors.textPrimary,
+    fontFamily: 'monospace',
     fontSize: 15,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md - 2,
     marginBottom: spacing.md,
-    backgroundColor: colors.surfaceRaised,
+    backgroundColor: colors.glassFill,
   },
+  // Primary = solid neon-edged glass; secondary = fainter. Both mono/uppercase.
   button: {
-    backgroundColor: colors.white,
+    backgroundColor: colors.glassFillStrong,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
     paddingVertical: spacing.md,
-    borderRadius: radii.pill,
+    borderRadius: radii.md,
     alignItems: 'center',
   },
-  buttonSecondary: {backgroundColor: colors.chipBg},
+  buttonSecondary: {backgroundColor: colors.glassFill, borderColor: colors.glassBorderSoft},
   buttonDisabled: {opacity: 0.6},
-  buttonText: {color: colors.black, fontSize: 16, fontWeight: '700'},
-  buttonSecondaryText: {color: colors.textPrimary, fontSize: 16, fontWeight: '700'},
+  buttonText: {
+    color: colors.neon,
+    fontSize: 13,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
+  buttonSecondaryText: {
+    color: colors.textPrimary,
+    fontSize: 13,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
 });

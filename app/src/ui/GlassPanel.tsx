@@ -61,10 +61,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.holoSheen,
   },
   glow: {
+    // iOS-only bloom; no `elevation` (Android would draw a sharp shadow box).
     shadowColor: colors.neonGlow,
     shadowOpacity: 1,
     shadowRadius: 14,
     shadowOffset: {width: 0, height: 0},
-    elevation: 10,
   },
 });

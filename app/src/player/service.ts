@@ -1,5 +1,11 @@
 import TrackPlayer, {Event} from 'react-native-track-player';
-import {skipToNext, skipToPrevious, togglePlayPause} from './controller';
+import {
+  handleQueueEnded,
+  onActiveTrackChanged,
+  skipToNext,
+  skipToPrevious,
+  togglePlayPause,
+} from './controller';
 
 // LIMITATION (post-process-death): this headless JS service only runs while
 // the app process is alive (foreground or backgrounded-but-resident). If
@@ -21,7 +27,16 @@ export async function playbackService(): Promise<void> {
   TrackPlayer.addEventListener(Event.RemoteNext, () => skipToNext());
   TrackPlayer.addEventListener(Event.RemotePrevious, () => skipToPrevious());
   TrackPlayer.addEventListener(Event.RemoteStop, () => TrackPlayer.stop());
-  // Auto-advance when a song ends: the single-track queue runs out, so this
-  // fires -> load the next song (from the prefetched file if ready = instant).
-  TrackPlayer.addEventListener(Event.PlaybackQueueEnded, () => skipToNext());
+  // Native auto-advance: when a track ends, ExoPlayer moves to the pre-loaded
+  // next track in its queue and fires this -- the ONLY signal for a
+  // background/locked-screen advance (no JS skip is involved there). The
+  // controller updates its mirror + refills the window from here. Because the
+  // player never stops at the boundary, the media foreground service + wake lock
+  // stay held, so playback continues with the screen locked.
+  TrackPlayer.addEventListener(Event.PlaybackActiveTrackChanged, () =>
+    onActiveTrackChanged(),
+  );
+  // Genuine end of the queue (source exhausted). Repeat-one is handled natively
+  // via RepeatMode.Track, so this is only the real end.
+  TrackPlayer.addEventListener(Event.PlaybackQueueEnded, () => handleQueueEnded());
 }

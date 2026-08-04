@@ -1,27 +1,51 @@
-// Covers the single-track + prefetch playback model: playFrom loads the first
-// song and requests a prefetch of the next; a skip to a PREFETCHED song plays
-// from its local file with no network resolve (the instant path); the fallback
-// path still resolves live and caps consecutive failures; previous walks
-// history; the old track is stopped before the new resolve.
+// Covers the WINDOWED native-advance model + COALESCED manual skips:
+//  - playFrom loads the first song AND pre-loads the next into the player queue;
+//  - a song ending advances to that pre-loaded track NATIVELY (no reset/gap) so
+//    playback survives a locked screen;
+//  - rapid "next" taps advance the UI instantly but load ONLY the landed song
+//    (the player is paused during the burst, the load is debounced);
+//  - previous reloads the played song from history;
+//  - repeat-one maps to native RepeatMode.Track; the first-load failure cap holds.
 import {QueueSource} from '../src/player/queue';
 import {Song} from '../src/types';
+
+// Stateful RNTP mock modelling the native queue + active index.
+const mockState: {queue: string[]; active: number} = {queue: [], active: 0};
 
 jest.mock('react-native-track-player', () => ({
   __esModule: true,
   default: {
     setupPlayer: jest.fn().mockResolvedValue(undefined),
     updateOptions: jest.fn().mockResolvedValue(undefined),
-    reset: jest.fn().mockResolvedValue(undefined),
-    add: jest.fn().mockResolvedValue(undefined),
+    reset: jest.fn(async () => {
+      mockState.queue = [];
+      mockState.active = 0;
+    }),
+    add: jest.fn(async (t: {id: string}) => {
+      mockState.queue.push(t.id);
+    }),
     play: jest.fn().mockResolvedValue(undefined),
     pause: jest.fn().mockResolvedValue(undefined),
     stop: jest.fn().mockResolvedValue(undefined),
     seekTo: jest.fn().mockResolvedValue(undefined),
+    skipToNext: jest.fn(async () => {
+      if (mockState.active < mockState.queue.length - 1) mockState.active += 1;
+    }),
+    skipToPrevious: jest.fn(async () => {
+      if (mockState.active > 0) mockState.active -= 1;
+    }),
+    getActiveTrackIndex: jest.fn(async () => mockState.active),
+    getActiveTrack: jest.fn(async () => {
+      const id = mockState.queue[mockState.active];
+      return id != null ? {id} : undefined;
+    }),
+    setRepeatMode: jest.fn().mockResolvedValue(undefined),
     getProgress: jest.fn().mockResolvedValue({position: 0, duration: 200, buffered: 0}),
     getPlaybackState: jest.fn().mockResolvedValue({state: 'none'}),
   },
   State: {Playing: 'playing', Paused: 'paused'},
   Event: {},
+  RepeatMode: {Off: 'off', Track: 'track', Queue: 'queue'},
   AppKilledPlaybackBehavior: {ContinuePlayback: 'continue-playback'},
   Capability: {},
 }));
@@ -50,8 +74,14 @@ import {
   playFrom,
   skipToNext,
   skipToPrevious,
+  onActiveTrackChanged,
+  handleQueueEnded,
+  setRepeatOne,
+  isRepeatOne,
+  peekNextSong,
   nowPlaying,
   consumeFallbackStatus,
+  _resetControllerForTests,
 } from '../src/player/controller';
 
 const tp = TrackPlayer as unknown as Record<string, jest.Mock>;
@@ -60,11 +90,9 @@ const offlineMock = offlineUrl as jest.Mock;
 const prefetchedMock = getPrefetchedStream as jest.Mock;
 const requestPrefetchMock = requestPrefetch as jest.Mock;
 
-const flush = () => new Promise<void>(r => setImmediate(() => r()));
-// skipToNext/skipToPrevious are fire-and-forget now (a single-flight loader runs
-// the async load), so let several microtask rounds drain before asserting.
+// Advance past the skip debounce AND flush the promise microtasks it schedules.
 const settle = async () => {
-  for (let i = 0; i < 12; i++) await flush();
+  await jest.advanceTimersByTimeAsync(400);
 };
 
 function song(id: string): Song {
@@ -72,8 +100,16 @@ function song(id: string): Song {
 }
 const addedIds = () => tp.add.mock.calls.map(c => c[0].id);
 const resolvedIds = () => resolveMock.mock.calls.map(c => c[0]);
+const addedContains = (id: string) => tp.add.mock.calls.some(c => c[0].id === id);
 
-// Deterministic ordered source with peekNext (mirrors SimpleQueue).
+// Simulate the real player finishing a track (native auto-advance): ExoPlayer
+// moves to the next queued track and fires PlaybackActiveTrackChanged.
+async function autoAdvance(): Promise<void> {
+  if (mockState.active < mockState.queue.length - 1) mockState.active += 1;
+  await onActiveTrackChanged();
+  await settle();
+}
+
 class ListSource implements QueueSource {
   label = 'list';
   private i = 0;
@@ -91,7 +127,6 @@ class ListSource implements QueueSource {
   }
 }
 
-// next() never runs dry (mirrors VibeQueue random fallback) -- for the cap test.
 class EndlessSource implements QueueSource {
   label = 'endless';
   private n = 0;
@@ -103,79 +138,154 @@ class EndlessSource implements QueueSource {
 }
 
 beforeEach(() => {
+  jest.useFakeTimers();
   jest.clearAllMocks();
+  mockState.queue = [];
+  mockState.active = 0;
+  _resetControllerForTests();
   offlineMock.mockResolvedValue(null);
   prefetchedMock.mockReturnValue(null);
   resolveMock.mockResolvedValue({url: 'https://example.com/s.mp3', headers: {}});
 });
 
-describe('single-track + prefetch playback', () => {
-  test('playFrom loads the first song and requests a prefetch of the next', async () => {
+afterEach(() => {
+  jest.useRealTimers();
+});
+
+describe('windowed native-advance', () => {
+  test('playFrom loads the first song AND pre-loads the next', async () => {
     await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
-    await flush();
-    expect(addedIds()).toEqual(['a']);
+    await settle();
+    expect(addedIds()).toEqual(['a', 'b']);
     expect(nowPlaying()?.videoId).toBe('a');
-    // it kicked off prefetch of the next song 'b'
-    expect(requestPrefetchMock).toHaveBeenCalled();
-    expect(requestPrefetchMock.mock.calls.at(-1)?.[0]?.videoId).toBe('b');
+    expect(peekNextSong()?.videoId).toBe('b');
+    expect(requestPrefetchMock.mock.calls.at(-1)?.[0]?.videoId).toBe('c');
   });
 
-  test('a skip to a song with a pre-resolved URL uses it (no re-resolve)', async () => {
+  test('a song ending advances to the pre-loaded next NATIVELY (no reset)', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
+    await settle();
+    tp.reset.mockClear();
+
+    await autoAdvance();
+
+    expect(nowPlaying()?.videoId).toBe('b');
+    expect(tp.reset).not.toHaveBeenCalled();
+    expect(addedContains('c')).toBe(true);
+  });
+
+  test('the pre-loaded next uses a prefetched URL when available (no re-resolve)', async () => {
     prefetchedMock.mockImplementation((id: string) =>
       id === 'b' ? {url: 'https://cdn/b.mp3', headers: {}} : null,
     );
-    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
-    await flush();
     resolveMock.mockClear();
-
-    await skipToNext(); // -> b, which is pre-resolved
+    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
     await settle();
-    expect(resolveMock).not.toHaveBeenCalled(); // never re-resolved
-    expect(tp.add.mock.calls.at(-1)?.[0].url).toBe('https://cdn/b.mp3');
+    expect(resolvedIds()).not.toContain('b');
+    expect(tp.add.mock.calls.find(c => c[0].id === 'b')?.[0].url).toBe('https://cdn/b.mp3');
+  });
+});
+
+describe('coalesced manual skips', () => {
+  test('a single next tap flips instantly and advances via a native skip (no reload)', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
+    await settle();
+    tp.reset.mockClear();
+    tp.skipToNext.mockClear();
+
+    void skipToNext();
+    expect(nowPlaying()?.videoId).toBe('b'); // instant flip, before any load
+    expect(tp.pause).toHaveBeenCalled(); // burst pauses the old song
+
+    await settle(); // debounce fires
     expect(nowPlaying()?.videoId).toBe('b');
+    // landed on the pre-loaded window next -> native advance, NOT a reset+reload
+    expect(tp.skipToNext).toHaveBeenCalled();
+    expect(tp.reset).not.toHaveBeenCalled();
   });
 
-  test('a rapid burst of skips loads ONLY the final song, not each one', async () => {
+  test('a rapid burst loads ONLY the landed song, never the ones skipped past', async () => {
     await playFrom(new ListSource(['a', 'b', 'c', 'd', 'e']), song('a'));
     await settle();
     tp.add.mockClear();
     resolveMock.mockClear();
 
-    // Four taps in the same tick (no await between) -> current advances to 'e'.
+    // four taps in the same tick -> land on 'e'
     void skipToNext();
     void skipToNext();
     void skipToNext();
     void skipToNext();
     expect(nowPlaying()?.videoId).toBe('e'); // UI advanced instantly
-    await settle();
+    expect(tp.add).not.toHaveBeenCalled(); // nothing loaded mid-burst
 
-    // Only 'e' was actually loaded -- b/c/d were never added to the player.
-    expect(addedIds()).toEqual(['e']);
-    expect(resolvedIds()).toEqual(['e']);
+    await settle(); // tapping stopped -> load only 'e'
+    expect(nowPlaying()?.videoId).toBe('e');
+    expect(resolvedIds()).toContain('e');
+    expect(resolvedIds()).not.toContain('b');
+    expect(resolvedIds()).not.toContain('c');
+    expect(resolvedIds()).not.toContain('d');
   });
 
-  test('a skip to a NON-prefetched song resolves live', async () => {
-    await playFrom(new ListSource(['a', 'b']), song('a'));
-    await flush();
-    resolveMock.mockClear();
-    await skipToNext();
+  test('previous after a burst steps back one song at a time (not to the burst start)', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c', 'd', 'e']), song('a'));
     await settle();
-    expect(resolvedIds()).toContain('b');
+
+    void skipToNext();
+    void skipToNext();
+    void skipToNext();
+    void skipToNext();
+    await settle(); // burst lands on 'e'
+    expect(nowPlaying()?.videoId).toBe('e');
+
+    await skipToPrevious();
+    await settle();
+    expect(nowPlaying()?.videoId).toBe('d'); // one back, NOT 'a'
+
+    await skipToPrevious();
+    await settle();
+    expect(nowPlaying()?.videoId).toBe('c'); // another back
+  });
+
+  test('previous reloads the played song from history', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
+    await settle();
+    void skipToNext(); // -> b
+    await settle(); // commit b, history [a]
+    tp.add.mockClear();
+
+    await skipToPrevious(); // pos 0 -> pop history -> a
+    await settle();
+
+    expect(nowPlaying()?.videoId).toBe('a');
+    expect(addedContains('a')).toBe(true);
+  });
+
+  test('previous at the start of the timeline restarts the current track', async () => {
+    await playFrom(new ListSource(['a', 'b']), song('a'));
+    await settle();
+    tp.reset.mockClear();
+
+    await skipToPrevious(); // pos is 0 -> restart current, don't reload
+    await settle();
+
+    expect(tp.seekTo).toHaveBeenCalledWith(0);
+    expect(tp.reset).not.toHaveBeenCalled();
+  });
+
+  test('ping-ponging next/previous then stopping loads the right song', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c', 'd']), song('a'));
+    await settle();
+    tp.reset.mockClear();
+
+    // next, prev, next, prev, next -> net one forward, landing on 'b'
+    void skipToNext();
+    void skipToPrevious();
+    void skipToNext();
+    void skipToPrevious();
+    void skipToNext();
     expect(nowPlaying()?.videoId).toBe('b');
-  });
-
-  test('old track is stopped (reset) before the new resolve', async () => {
-    // reset must be called before resolveStreamUrl for the skip target.
-    const order: string[] = [];
-    tp.reset.mockImplementation(async () => order.push('reset'));
-    resolveMock.mockImplementation(async () => {
-      order.push('resolve');
-      return {url: 'https://example.com/s.mp3', headers: {}};
-    });
-    await playFrom(new ListSource(['a', 'b']), song('a'));
-    await flush();
-    // for the initial load: reset happened before resolve
-    expect(order.indexOf('reset')).toBeLessThan(order.indexOf('resolve'));
+    await settle();
+    expect(nowPlaying()?.videoId).toBe('b'); // committed to the landed song, not a random one
   });
 });
 
@@ -185,44 +295,36 @@ describe('offline-first', () => {
       id === 'a' ? 'file:///offline/a.audio' : null,
     );
     await playFrom(new ListSource(['a', 'b']), song('a'));
-    await flush();
+    await settle();
     expect(resolvedIds()).not.toContain('a');
     expect(tp.add.mock.calls[0][0].url).toBe('file:///offline/a.audio');
   });
 });
 
-describe('skip fallback + previous', () => {
-  test('stops after the consecutive-failure cap instead of looping forever', async () => {
-    resolveMock.mockRejectedValue(new Error('offline'));
-    await expect(playFrom(new EndlessSource(), song('seed'))).rejects.toThrow();
-    resolveMock.mockClear();
-    tp.stop.mockClear();
+describe('repeat-one', () => {
+  test('setRepeatOne toggles the native RepeatMode', async () => {
+    await setRepeatOne(true);
+    expect(tp.setRepeatMode).toHaveBeenCalledWith('track');
+    expect(isRepeatOne()).toBe(true);
+    await setRepeatOne(false);
+    expect(tp.setRepeatMode).toHaveBeenCalledWith('off');
+    expect(isRepeatOne()).toBe(false);
+  });
+});
 
-    await skipToNext();
+describe('failure handling', () => {
+  test('first-load caps consecutive resolve failures instead of looping forever', async () => {
+    resolveMock.mockRejectedValue(new Error('offline'));
+    await playFrom(new EndlessSource(), song('seed'));
     await settle();
     expect(resolveMock).toHaveBeenCalledTimes(5); // capped
-    expect(tp.stop).toHaveBeenCalledTimes(1);
+    expect(tp.stop).toHaveBeenCalled();
     expect(consumeFallbackStatus()).toBe('error');
   });
 
-  test('previous walks history back near the start of the track', async () => {
-    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
-    await skipToNext(); // -> b, history [a]
+  test('end of queue: PlaybackQueueEnded with no next does not throw', async () => {
+    await playFrom(new ListSource(['a']), song('a'));
     await settle();
-    tp.add.mockClear();
-    await skipToPrevious(); // pos 0 -> pop -> a
-    await settle();
-    expect(tp.add.mock.calls.at(-1)?.[0].id).toBe('a');
-    expect(tp.seekTo).not.toHaveBeenCalled();
-  });
-
-  test('previous restarts the track when >3s in', async () => {
-    tp.getProgress.mockResolvedValue({position: 42, duration: 200, buffered: 0});
-    await playFrom(new ListSource(['a', 'b']), song('a'));
-    tp.add.mockClear();
-    await skipToPrevious();
-    await settle();
-    expect(tp.seekTo).toHaveBeenCalledWith(0);
-    expect(tp.add).not.toHaveBeenCalled();
+    await expect(handleQueueEnded()).resolves.toBeUndefined();
   });
 });

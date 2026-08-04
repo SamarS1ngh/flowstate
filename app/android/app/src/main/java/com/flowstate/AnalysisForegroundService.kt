@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 
 /**
  * Minimal, reliable foreground service for on-device analysis.
@@ -29,11 +30,19 @@ import android.os.IBinder
  * title/text), UPDATE (new text), STOP.
  */
 class AnalysisForegroundService : Service() {
+    // Partial wake lock held for the service's lifetime. A foreground service
+    // stops Android from KILLING the process, but it does NOT keep the CPU
+    // awake once the screen is off -- and analysis is pure CPU work (audio
+    // decode + TFLite). Without this, a locked screen dozes the CPU and the JS
+    // analysis loop stalls until unlock. This keeps the CPU running.
+    private var wakeLock: PowerManager.WakeLock? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.getStringExtra(EXTRA_ACTION)) {
             ACTION_STOP -> {
+                releaseWakeLock()
                 stopForegroundCompat()
                 stopSelf()
                 return START_NOT_STICKY
@@ -45,9 +54,31 @@ class AnalysisForegroundService : Service() {
                 // startForegroundService that triggered this) -- this is the
                 // whole point of the native service.
                 startForegroundCompat(buildNotification(this, title, text))
+                acquireWakeLock()
             }
         }
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        releaseWakeLock()
+        super.onDestroy()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "flowstate:analysis")
+        wl.setReferenceCounted(false)
+        // Safety timeout so a missed STOP (crash) can never hold the CPU forever;
+        // a real batch re-acquires on each START/UPDATE well within this.
+        wl.acquire(6 * 60 * 60 * 1000L)
+        wakeLock = wl
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
     }
 
     private fun startForegroundCompat(notification: Notification) {

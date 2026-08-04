@@ -6,6 +6,7 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
@@ -39,9 +40,11 @@ import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
 import Collage from '../ui/Collage';
+import HoloFrame from '../ui/HoloFrame';
 import IconButton from '../ui/IconButton';
 import ListRow from '../ui/ListRow';
-import {colors, spacing, type} from '../ui/theme';
+import {filterSongs} from '../library/search';
+import {colors, radii, spacing} from '../ui/theme';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Playlist'>;
 
@@ -65,6 +68,7 @@ export default function PlaylistScreen({route, navigation}: Props) {
   const [vibeMode, setVibeMode] = useState(false);
   const [startingId, setStartingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
   // Batch "Analyze playlist" progress now lives in a module-level controller
   // (analyzer.ts) so it SURVIVES navigating away from this screen -- we just
   // mirror its state here. `batch` is the global batch; it's only *this*
@@ -190,8 +194,13 @@ export default function PlaylistScreen({route, navigation}: Props) {
     retryFailedAnalysis(playlistId);
   };
 
+  // Songs filtered by the in-playlist search box. Playback queues from THIS
+  // (visible) list so the queue matches what's on screen -- mirrors Library.
+  const visibleSongs = useMemo(() => filterSongs(songs, search), [songs, search]);
+
   const playIndex = (index: number) => {
-    const song = songs[index];
+    const song = visibleSongs[index];
+    if (!song) return;
     try {
       const seed = vibeSongs.find(v => v.videoId === song.videoId);
       // Plan D Task 6 lazy scheduling: a song that starts playing but isn't
@@ -235,7 +244,7 @@ export default function PlaylistScreen({route, navigation}: Props) {
           // reads as vibe mode randomly "not working" for some songs.
           setNotice('Song not analyzed yet — normal queue');
         }
-        queue = new SimpleQueue(songs, index);
+        queue = new SimpleQueue(visibleSongs, index);
         first = song;
       }
       navigation.navigate('Player');
@@ -318,28 +327,38 @@ export default function PlaylistScreen({route, navigation}: Props) {
         <FlatList
           style={styles.list}
           contentContainerStyle={styles.listContent}
-          data={songs}
+          data={visibleSongs}
           keyExtractor={item => item.videoId}
           initialNumToRender={14}
+          keyboardShouldPersistTaps="handled"
+          ListEmptyComponent={
+            search.trim().length > 0 ? (
+              <Text style={styles.emptySearch}>No songs match “{search.trim()}”</Text>
+            ) : null
+          }
           ListHeaderComponent={
             <View style={styles.header}>
-              <Collage videoIds={coverIds} size={200} />
+              <HoloFrame radius={16} cornerSize={22} style={styles.coverHolo}>
+                <Collage videoIds={coverIds} size={200} />
+              </HoloFrame>
+              <Text style={styles.sysLabel}>◤ PLAYLIST</Text>
               <Text style={styles.title} numberOfLines={2}>
                 {playlistName}
               </Text>
-              <Text style={styles.subtitle}>{subtitle}</Text>
+              <Text style={styles.subtitle}>{subtitle.toUpperCase()}</Text>
 
               <View style={styles.actionsRow}>
                 <CircleButton
                   icon="play"
                   size={64}
+                  iconSize={26}
                   onPress={() => songs.length > 0 && playIndex(0)}
                 />
                 <Pressable
                   style={[styles.vibeShuffleButton, vibeSongs.length === 0 && styles.disabled]}
                   disabled={vibeSongs.length === 0}
                   onPress={onVibeShuffle}>
-                  <Text style={styles.vibeShuffleText}>✨ Vibe shuffle</Text>
+                  <Text style={styles.vibeShuffleText}>✨ VIBE SHUFFLE</Text>
                 </Pressable>
               </View>
 
@@ -437,6 +456,27 @@ export default function PlaylistScreen({route, navigation}: Props) {
                   <Text style={styles.noticeText}>{notice}</Text>
                 </View>
               ) : null}
+
+              {/* In-playlist search: filters the song list below by title/artist. */}
+              <View style={styles.searchRow}>
+                <Text style={styles.searchIcon}>⌕</Text>
+                <TextInput
+                  style={styles.searchInput}
+                  value={search}
+                  onChangeText={setSearch}
+                  placeholder="Search this playlist"
+                  placeholderTextColor={colors.textTertiary}
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                  returnKeyType="search"
+                  clearButtonMode="while-editing"
+                />
+                {search.length > 0 ? (
+                  <Pressable onPress={() => setSearch('')} hitSlop={12}>
+                    <Text style={styles.searchClear}>✕</Text>
+                  </Pressable>
+                ) : null}
+              </View>
             </View>
           }
           renderItem={({item, index}) => (
@@ -484,8 +524,30 @@ const styles = StyleSheet.create({
   list: {flex: 1, backgroundColor: colors.bg},
   listContent: {paddingBottom: spacing.xxxl},
   header: {alignItems: 'center', paddingTop: spacing.xxxl, paddingHorizontal: spacing.lg},
-  title: {...type.title, marginTop: spacing.lg, textAlign: 'center'},
-  subtitle: {color: colors.textSecondary, fontSize: 14, marginTop: spacing.xs},
+  coverHolo: {padding: 8},
+  sysLabel: {
+    color: colors.neon,
+    fontFamily: 'monospace',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 2,
+    marginTop: spacing.lg,
+  },
+  title: {
+    color: colors.textPrimary,
+    fontFamily: 'monospace',
+    fontSize: 20,
+    fontWeight: '700',
+    marginTop: spacing.sm,
+    textAlign: 'center',
+  },
+  subtitle: {
+    color: colors.textSecondary,
+    fontFamily: 'monospace',
+    fontSize: 12,
+    letterSpacing: 1,
+    marginTop: spacing.xs,
+  },
   actionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -493,19 +555,49 @@ const styles = StyleSheet.create({
   },
   vibeShuffleButton: {
     marginLeft: spacing.lg,
-    backgroundColor: colors.chipBg,
-    borderRadius: 999,
+    backgroundColor: colors.glassFillStrong,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
     paddingHorizontal: spacing.xl,
     paddingVertical: spacing.md,
   },
   disabled: {opacity: 0.4},
-  vibeShuffleText: {color: colors.textPrimary, fontSize: 14, fontWeight: '700'},
+  vibeShuffleText: {
+    color: colors.neon,
+    fontSize: 12,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
   vibeToggleRow: {
     flexDirection: 'row',
     marginTop: spacing.xl,
   },
   noticeBanner: {marginTop: spacing.md},
   noticeText: {color: colors.textTertiary, fontSize: 12, textAlign: 'center'},
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    marginTop: spacing.xl,
+    paddingHorizontal: spacing.md,
+    height: 40,
+    backgroundColor: colors.glassFill,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.glassBorderSoft,
+  },
+  searchIcon: {color: colors.neon, fontSize: 18, marginRight: spacing.sm},
+  searchInput: {flex: 1, color: colors.textPrimary, fontSize: 15, padding: 0, fontFamily: 'monospace'},
+  searchClear: {color: colors.textTertiary, fontSize: 15, paddingLeft: spacing.sm},
+  emptySearch: {
+    color: colors.textSecondary,
+    fontSize: 15,
+    textAlign: 'center',
+    paddingVertical: spacing.xxl,
+    paddingHorizontal: spacing.lg,
+  },
   analyzeRow: {
     flexDirection: 'row',
     alignItems: 'center',

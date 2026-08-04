@@ -9,6 +9,11 @@
          processes audio, so "dataSync" is the fit. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Partial wake lock: a foreground service stops the process being killed
+         but does NOT keep the CPU awake with the screen off. Analysis is pure
+         CPU work, so AnalysisForegroundService holds a PARTIAL_WAKE_LOCK to keep
+         it running while locked. (Also used by ExoPlayer for locked playback.) -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
       android:name=".MainApplication"

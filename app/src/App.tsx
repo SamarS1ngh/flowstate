@@ -256,7 +256,11 @@ function AppShell() {
               animationDuration: 140,
             }}
           />
-          <Stack.Screen name="Settings" component={SettingsScreen} />
+          <Stack.Screen
+            name="Settings"
+            component={SettingsScreen}
+            options={{headerShown: false}}
+          />
           <Stack.Screen
             name="Login"
             component={LoginScreen}

@@ -22,11 +22,19 @@ export default function MiniPlayer({onPress}: {onPress: () => void}) {
 
   return (
     <Pressable onPress={onPress} style={({pressed}) => [styles.bar, pressed && styles.pressed]}>
-      <Thumbnail videoId={song.videoId} size={thumbSize.mini} radius={radii.sm} />
+      {/* Neon top rail + a live status pip -- the mini dock reads as part of
+          the same HUD as the full player. */}
+      <View style={styles.rail} />
+      <View style={styles.artWrap}>
+        <Thumbnail videoId={song.videoId} size={thumbSize.mini} radius={radii.sm} />
+      </View>
       <View style={styles.text}>
-        <Text style={styles.title} numberOfLines={1}>
-          {song.title}
-        </Text>
+        <View style={styles.titleRow}>
+          <View style={[styles.pip, {backgroundColor: isPlaying ? colors.neon : colors.textTertiary}]} />
+          <Text style={styles.title} numberOfLines={1}>
+            {song.title}
+          </Text>
+        </View>
         <Text style={styles.artist} numberOfLines={1}>
           {song.artist}
         </Text>
@@ -35,6 +43,7 @@ export default function MiniPlayer({onPress}: {onPress: () => void}) {
         name={isPlaying ? 'pause' : 'play'}
         onPress={() => togglePlayPause()}
         size={18}
+        color={colors.neon}
         hitSlop={8}
       />
     </Pressable>
@@ -46,13 +55,27 @@ const styles = StyleSheet.create({
     height: miniPlayerHeight,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.surfaceRaised,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
+    backgroundColor: colors.surface,
     paddingHorizontal: spacing.md,
   },
+  rail: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: colors.glassBorder,
+  },
   pressed: {backgroundColor: colors.surfacePressed},
+  artWrap: {
+    borderWidth: 1,
+    borderColor: colors.glassBorderSoft,
+    borderRadius: radii.sm + 1,
+    padding: 1,
+  },
   text: {flex: 1, marginLeft: spacing.md, marginRight: spacing.sm},
-  title: {color: colors.textPrimary, fontSize: 13, fontWeight: '600'},
-  artist: {color: colors.textSecondary, fontSize: 11, marginTop: 2},
+  titleRow: {flexDirection: 'row', alignItems: 'center'},
+  pip: {width: 6, height: 6, borderRadius: 3, marginRight: spacing.sm},
+  title: {flex: 1, color: colors.textPrimary, fontSize: 13, fontWeight: '700', fontFamily: 'monospace'},
+  artist: {color: colors.textSecondary, fontSize: 11, marginTop: 2, fontFamily: 'monospace'},
 });

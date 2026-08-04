@@ -16,15 +16,17 @@ export const colors = {
   surface: '#141418', // rows, cards, headers
   surfaceRaised: '#1e1e24', // chips (inactive), mini player, inputs
   surfacePressed: '#2a2a32',
-  border: '#2a2a32',
+  border: '#3a3a46', // brighter separator so rows/cards read in daylight
 
-  // Text
+  // Text -- tuned for daylight legibility on a dark surface: no dim greys that
+  // wash out under ambient sun. Secondary/tertiary pushed brighter than a
+  // typical dark theme so labels stay readable outdoors.
   textPrimary: '#ffffff',
-  textSecondary: '#b3b3bd',
-  textTertiary: '#7a7a86',
+  textSecondary: '#cdcdd7',
+  textTertiary: '#9a9aa8',
 
   // Chips / pills
-  chipBg: 'rgba(255,255,255,0.07)',
+  chipBg: 'rgba(255,255,255,0.14)',
   chipActiveBg: '#ffffff',
   chipActiveText: '#0a0a0a',
 
@@ -35,18 +37,20 @@ export const colors = {
   accentDeep: '#7a1fd0', // gradient bottom / pressed
   accentSoft: 'rgba(192,77,255,0.16)', // tinted fills behind accent content
   accentText: '#0b0714',
-  neon: '#c04dff',
-  neonGlow: 'rgba(192,77,255,0.55)', // shadowColor for glow effects
+  neon: '#c85cff', // slightly brighter/more saturated so the stroke pops in sun
+  neonGlow: 'rgba(192,77,255,0.55)', // shadowColor for glow effects (decorative)
 
   // Holographic surfaces -- NOT frosted glass. Barely-there fills so the
   // art-tinted backdrop shows through (a projection floating in space), defined
   // almost entirely by a GLOWING thin neon edge. Clean, luminous, minimal.
-  glassFill: 'rgba(192,77,255,0.05)',
-  glassFillStrong: 'rgba(192,77,255,0.09)',
-  glassBorder: 'rgba(200,120,255,0.65)', // glowing neon edge
-  glassBorderSoft: 'rgba(255,255,255,0.20)',
-  holoLine: 'rgba(200,120,255,0.85)', // bright hairline for dividers/edges
-  holoSheen: 'rgba(255,255,255,0.14)', // faint top highlight (projected edge)
+  // Edges carry the whole UI in daylight (glow bloom disappears outdoors), so
+  // strokes are near-opaque and fills a touch stronger for panel/bg separation.
+  glassFill: 'rgba(192,77,255,0.08)',
+  glassFillStrong: 'rgba(192,77,255,0.13)',
+  glassBorder: 'rgba(206,130,255,0.95)', // neon edge -- solid enough to read in sun
+  glassBorderSoft: 'rgba(255,255,255,0.42)',
+  holoLine: 'rgba(210,140,255,0.98)', // bright hairline for dividers/edges
+  holoSheen: 'rgba(255,255,255,0.24)', // top highlight (projected edge)
 
   // Kept as a sparkle highlight ONLY for the "magic" vibe-shuffle affordance.
   magic: '#f5c451',
@@ -66,8 +70,10 @@ export const colors = {
 // for the Player backdrop, playlist headers, and scrims. Kept here so the whole
 // app pulls the same violet-into-black feel from one place.
 export const gradients: {playerBackdrop: string[]; scrimDown: string[]} = {
-  // Player / header backdrop: violet glow up top fading into the app bg.
-  playerBackdrop: ['#241a3d', '#120f1d', colors.bg],
+  // Player / header backdrop: a deep, near-flat violet-black. Deliberately
+  // subtle (not an album-colour wash) so the screen reads as a dark HUD
+  // surface rather than a normal now-playing gradient.
+  playerBackdrop: ['#120e1e', '#0b0910', colors.bg],
   // A soft top-down scrim to keep text legible over artwork.
   scrimDown: ['rgba(8,8,11,0)', 'rgba(8,8,11,0.85)'],
 };
