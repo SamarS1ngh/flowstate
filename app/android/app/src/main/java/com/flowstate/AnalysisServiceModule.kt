@@ -4,7 +4,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.Uri
 import android.os.BatteryManager
+import android.os.PowerManager
+import android.provider.Settings
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -57,6 +60,42 @@ class AnalysisServiceModule(private val reactContext: ReactApplicationContext) :
         try {
             AnalysisForegroundService.stop(reactContext)
         } catch (_: Exception) {
+        }
+    }
+
+    // --- battery-optimization exemption -------------------------------
+    // Even with a foreground service + wake lock, a battery-OPTIMIZED app gets
+    // its background threads throttled (App Standby), so on-device analysis
+    // crawls when the screen is off. Exempting the app lets the OS run the
+    // service at close to foreground speed while locked.
+
+    @ReactMethod
+    fun isIgnoringBatteryOptimizations(promise: Promise) {
+        try {
+            val pm = reactContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+            promise.resolve(pm.isIgnoringBatteryOptimizations(reactContext.packageName))
+        } catch (_: Exception) {
+            promise.resolve(true) // don't nag if we can't tell
+        }
+    }
+
+    /** Opens the system prompt to exempt this app from battery optimization. */
+    @ReactMethod
+    fun requestIgnoreBatteryOptimizations() {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                .setData(Uri.parse("package:" + reactContext.packageName))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            reactContext.startActivity(intent)
+        } catch (_: Exception) {
+            // Fall back to the general battery-optimization settings list.
+            try {
+                reactContext.startActivity(
+                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            } catch (_: Exception) {
+            }
         }
     }
 

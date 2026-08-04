@@ -14,6 +14,9 @@
          CPU work, so AnalysisForegroundService holds a PARTIAL_WAKE_LOCK to keep
          it running while locked. (Also used by ExoPlayer for locked playback.) -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Lets the user exempt the app from battery optimization so on-device
+         analysis isn't App-Standby-throttled while the screen is locked. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
       android:name=".MainApplication"

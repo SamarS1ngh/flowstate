@@ -2,6 +2,7 @@ import React, {useCallback, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
+  NativeModules,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -17,7 +18,7 @@ import {useFocusEffect} from '@react-navigation/native';
 import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
 import IconButton from '../ui/IconButton';
-import {importVibesDb} from '../db/vibesDb';
+import {DB_FILENAME, importVibesDb} from '../db/vibesDb';
 import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
 import {getStorageInfo, removeAllDownloads} from '../offline/downloads';
 import {colors, radii, spacing} from '../ui/theme';
@@ -61,10 +62,51 @@ export default function SettingsScreen({navigation}: Props) {
   const [pauseLowBattery, setPauseLowBattery] = useState(true);
   const [storage, setStorage] = useState<{count: number; bytes: number} | null>(null);
   const [clearingDownloads, setClearingDownloads] = useState(false);
+  const [batteryExempt, setBatteryExempt] = useState<boolean | null>(null);
+  const [exporting, setExporting] = useState(false);
+
+  const refreshBatteryExempt = useCallback(() => {
+    const svc = NativeModules.AnalysisService as
+      | {isIgnoringBatteryOptimizations?: () => Promise<boolean>}
+      | undefined;
+    void svc?.isIgnoringBatteryOptimizations?.().then(setBatteryExempt).catch(() => {});
+  }, []);
+
+  const onRequestBatteryExempt = () => {
+    const svc = NativeModules.AnalysisService as
+      | {requestIgnoreBatteryOptimizations?: () => void}
+      | undefined;
+    svc?.requestIgnoreBatteryOptimizations?.();
+    // Re-check after the user returns from the system dialog.
+    setTimeout(refreshBatteryExempt, 1500);
+  };
+
+  const onExportDb = async () => {
+    setExporting(true);
+    try {
+      const src = `${RNFS.DocumentDirectoryPath}/${DB_FILENAME}`;
+      if (!(await RNFS.exists(src))) {
+        Alert.alert('No analysis DB', 'Nothing to export yet — analyze some songs first.');
+        return;
+      }
+      const dest = `${RNFS.ExternalDirectoryPath}/vibes-backup.db`;
+      if (await RNFS.exists(dest)) await RNFS.unlink(dest);
+      await RNFS.copyFile(src, dest);
+      Alert.alert(
+        'Analysis DB exported',
+        `Saved to:\n${dest}\n\nPull it to your computer with:\nadb pull ${dest}`,
+      );
+    } catch (e) {
+      Alert.alert('Export failed', e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   useFocusEffect(
     useCallback(() => {
       let cancelled = false;
+      refreshBatteryExempt();
       void isAutoAnalyzeEnabled().then(v => {
         if (!cancelled) setAutoAnalyze(v);
       });
@@ -408,6 +450,39 @@ export default function SettingsScreen({navigation}: Props) {
           />
         </View>
       </View>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Background analysis speed</Text>
+        <Text style={styles.sectionBody}>
+          {batteryExempt
+            ? 'Battery optimization is OFF for flowstate — analysis runs at full speed with the screen locked. ✓'
+            : 'Android throttles this app in the background, so analysis crawls when the screen is locked. Turn off battery optimization for flowstate to let it run at full speed while locked.'}
+        </Text>
+        {batteryExempt === false ? (
+          <Pressable style={styles.button} onPress={onRequestBatteryExempt}>
+            <Text style={styles.buttonText}>Allow full-speed background analysis</Text>
+          </Pressable>
+        ) : null}
+      </View>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Back up analysis data</Text>
+        <Text style={styles.sectionBody}>
+          Export your analyzed vibes.db to a copy you can pull off the device, so a
+          reinstall never means re-analyzing from scratch.
+        </Text>
+        <Pressable
+          style={[styles.button, styles.buttonSecondary, exporting && styles.buttonDisabled]}
+          disabled={exporting}
+          onPress={onExportDb}>
+          {exporting ? (
+            <ActivityIndicator color={colors.textPrimary} />
+          ) : (
+            <Text style={styles.buttonSecondaryText}>Export analysis DB</Text>
+          )}
+        </Pressable>
+      </View>
+
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Offline downloads</Text>
         <Text style={styles.sectionBody}>
