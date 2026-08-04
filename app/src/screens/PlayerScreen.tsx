@@ -252,13 +252,11 @@ export default function PlayerScreen({navigation}: Props) {
 
   // Up Next: SimpleQueue's order is fully known, so peek several ahead. VibeQueue
   // is generative, but it COMMITS one next pick (peekNextSong) -- so we can show
-  // that single real "coming up" song instead of a vague note. Recomputed on song
-  // change and whenever the vibe controls (mode/mood) change what's next.
-  const [vibeNext, setVibeNext] = useState<Song | null>(null);
-  useEffect(() => {
-    setVibeNext(isVibe ? peekNextSong() : null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [song?.videoId, isVibe, isLock, selectedMood]);
+  // that single real "coming up" song. Computed EVERY render (not cached in
+  // state) so it always equals the currently-committed next == what will actually
+  // play. A state+effect version showed a stale pick when the committed next
+  // changed after the effect last ran (preview said one song, another played).
+  const vibeNext = isVibe ? peekNextSong() : null;
   const upcoming = isVibe ? [] : peekUpcoming(UP_NEXT_COUNT);
 
   const onToggleLockDrift = () => {
