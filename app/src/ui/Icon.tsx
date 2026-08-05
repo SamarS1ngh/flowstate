@@ -27,7 +27,10 @@ export type IconName =
   | 'thumbsDown'
   | 'pin'
   | 'note'
-  | 'library';
+  | 'library'
+  | 'heart'
+  | 'heartOutline'
+  | 'radio';
 
 const GLYPHS: Record<IconName, string> = {
   chevronDown: '⌄',
@@ -48,6 +51,9 @@ const GLYPHS: Record<IconName, string> = {
   pin: '📌',
   note: '♪',
   library: '▤',
+  heart: '♥',
+  heartOutline: '♡',
+  radio: '📡',
 };
 
 export default function Icon({

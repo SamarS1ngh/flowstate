@@ -54,9 +54,16 @@ import {
   togglePlayPause,
   FallbackKind,
 } from '../player/controller';
-import {openVibesDb, VibesDb} from '../db/vibesDb';
+import {
+  openVibesDb,
+  VibesDb,
+  LIKED_PLAYLIST_ID,
+  LIKED_PLAYLIST_NAME,
+} from '../db/vibesDb';
 import {FeedbackStore} from '../engine/feedbackStore';
 import {VibeQueue} from '../engine/vibeQueue';
+import {RadioQueue} from '../engine/radioQueue';
+import {likeSong} from '../engine/accountLikes';
 import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
@@ -123,6 +130,10 @@ export default function PlayerScreen({navigation}: Props) {
   const [feedbackStore, setFeedbackStore] = useState<FeedbackStore | null>(null);
   const [vibesDb, setVibesDb] = useState<VibesDb | null>(null);
   const [startingVibe, setStartingVibe] = useState(false);
+  const [startingRadio, setStartingRadio] = useState(false);
+  // Local "liked" state for the current track (mirrors the local:liked
+  // playlist, which is also pushed to the real YouTube account on toggle).
+  const [liked, setLiked] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekPreview, setSeekPreview] = useState(0);
   // Latest playback position, kept in a ref so handlePrev can decide
@@ -220,6 +231,7 @@ export default function PlayerScreen({navigation}: Props) {
 
   const src = currentSource();
   const isVibe = src instanceof VibeQueue;
+  const isRadio = src instanceof RadioQueue;
 
   // Reset the mood-chip selection (and the underlying queue's filter) when
   // the active source changes identity -- e.g. the user started a new vibe
@@ -328,6 +340,56 @@ export default function PlayerScreen({navigation}: Props) {
     }
   };
 
+  // Reflect whether the current track is in the account's Liked Music playlist
+  // ('LM') whenever the song or db changes -- songs already liked show filled.
+  useEffect(() => {
+    if (!song || !vibesDb) {
+      setLiked(false);
+      return;
+    }
+    try {
+      setLiked(vibesDb.isSongInPlaylist(LIKED_PLAYLIST_ID, song.videoId));
+    } catch {
+      setLiked(false);
+    }
+  }, [song, vibesDb]);
+
+  // ❤️ Like the current track. One-way by design: liking pushes to the real
+  // account (/like/like) AND adds the song to the local Liked Music playlist
+  // so it shows immediately (a later sync re-fetches it from the account into
+  // the same 'LM' playlist). There is NO unlike -- removing a track from a
+  // YouTube playlist isn't possible with this TV token (see
+  // [[yt-tv-token-capabilities]]), so once liked the heart stays filled and
+  // the button is disabled.
+  const onLike = useCallback(async () => {
+    if (!song || liked) return;
+    const target = song;
+    setLiked(true); // optimistic
+    try {
+      const db = vibesDb ?? (await openVibesDb());
+      if (db) db.mirrorSong(target, LIKED_PLAYLIST_ID, LIKED_PLAYLIST_NAME);
+      void likeSong(target.videoId); // best-effort real-account write
+    } catch {
+      setLiked(false); // revert on local-db failure
+    }
+  }, [song, liked, vibesDb]);
+
+  // 📡 Start an endless song-radio seeded from the current track: related
+  // music streamed from YouTube (the one personalized-music surface the TV
+  // token can reach), fed straight into the existing player/timeline.
+  const onStartRadio = useCallback(async () => {
+    if (!song || startingRadio) return;
+    setStartingRadio(true);
+    try {
+      await playFrom(new RadioQueue(), song);
+      navigation.navigate('Radio'); // radio lives on its own screen
+    } catch (e) {
+      Alert.alert('Could not start radio', e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setStartingRadio(false);
+    }
+  }, [song, startingRadio, navigation]);
+
   // Shared by both the transport buttons and the horizontal swipe gesture so
   // the art's slide direction is consistent regardless of which one the user
   // used.
@@ -403,6 +465,24 @@ export default function PlayerScreen({navigation}: Props) {
     [dismiss, handleNext, handlePrev],
   );
 
+  // Double-tap the album art to like. Kept stable via a ref so the gesture
+  // isn't rebuilt every render (onLike changes with song/liked state).
+  const onLikeRef = useRef(onLike);
+  onLikeRef.current = onLike;
+  const triggerLike = useCallback(() => {
+    void onLikeRef.current();
+  }, []);
+  const doubleTapLike = useMemo(
+    () =>
+      Gesture.Tap()
+        .numberOfTaps(2)
+        .maxDuration(300)
+        .onEnd((_e, success) => {
+          if (success) runOnJS(triggerLike)();
+        }),
+    [triggerLike],
+  );
+
   const screenAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{translateY: translateY.value}],
     // Subtle fade as the player is dragged down, so the gesture reads as
@@ -467,6 +547,15 @@ export default function PlayerScreen({navigation}: Props) {
               <IconButton name="chevronDown" size={22} onPress={() => navigation.goBack()} />
               <Text style={styles.sysId}>FLOWSTATE.AUDIO_SYS</Text>
               <View style={styles.statusRight}>
+                <IconButton
+                  name="radio"
+                  size={18}
+                  color={isRadio ? colors.neon : colors.textSecondary}
+                  disabled={startingRadio}
+                  onPress={onStartRadio}
+                  hitSlop={10}
+                  style={styles.radioBtn}
+                />
                 <View style={styles.liveDot} />
                 <Text style={styles.liveText}>LIVE</Text>
               </View>
@@ -485,14 +574,33 @@ export default function PlayerScreen({navigation}: Props) {
                     : FadeIn.duration(200)
                 }
                 exiting={swipeDir === 'right' ? SlideOutRight.duration(200) : SlideOutLeft.duration(200)}>
-                <HoloFrame radius={20} cornerSize={24} style={styles.artHolo}>
-                  <Thumbnail videoId={song.videoId} size={ART_SIZE} radius={12} />
-                  <View style={styles.artTag}>
-                    <Text style={styles.artTagText}>
-                      {isVibe ? (isLock ? 'VIBE·LOCK' : 'VIBE·DRIFT') : 'QUEUE'}
-                    </Text>
-                  </View>
-                </HoloFrame>
+                <GestureDetector gesture={doubleTapLike}>
+                  <HoloFrame radius={20} cornerSize={24} style={styles.artHolo}>
+                    <Thumbnail videoId={song.videoId} size={ART_SIZE} radius={12} />
+                    <View style={styles.artTag}>
+                      <Text style={styles.artTagText}>
+                        {isRadio
+                          ? 'RADIO'
+                          : isVibe
+                          ? isLock
+                            ? 'VIBE·LOCK'
+                            : 'VIBE·DRIFT'
+                          : 'QUEUE'}
+                      </Text>
+                    </View>
+                    {/* Like: bottom-right of the art. Tap here OR double-tap the
+                        art. One-way -- filled + disabled once liked. */}
+                    <IconButton
+                      name={liked ? 'heart' : 'heartOutline'}
+                      size={22}
+                      color={liked ? colors.neon : colors.textPrimary}
+                      disabled={liked}
+                      onPress={onLike}
+                      hitSlop={8}
+                      style={styles.artLike}
+                    />
+                  </HoloFrame>
+                </GestureDetector>
               </Animated.View>
             </View>
 
@@ -759,6 +867,7 @@ const styles = StyleSheet.create({
     marginLeft: spacing.sm,
   },
   statusRight: {flexDirection: 'row', alignItems: 'center'},
+  radioBtn: {marginRight: spacing.sm},
   liveDot: {
     width: 6,
     height: 6,
@@ -795,6 +904,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 3,
+  },
+  artLike: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    backgroundColor: '#08080b',
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
   },
   artTagText: {
     color: colors.neon,

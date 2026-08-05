@@ -15,6 +15,13 @@ import {embeddingFromBlob} from './blob';
 
 export const DB_FILENAME = 'vibes.db';
 
+// The account's "Liked Music" auto-playlist (fixed YouTube id 'LM', synced by
+// syncClient). Liking a song in the player adds it here locally for immediate
+// display AND on the real account via /like/like -- a later sync re-fetches it
+// from YouTube into this same playlist, so the two reconcile.
+export const LIKED_PLAYLIST_ID = 'LM';
+export const LIKED_PLAYLIST_NAME = 'Liked Music';
+
 // Schema version written into a *freshly created* app db (no import ever
 // happened -- e.g. a logged-in user who has only ever synced, never
 // imported an analyzer vibes.db). Deliberately distinct from the analyzer's
@@ -330,6 +337,52 @@ export class VibesDb {
     return res.rows.length ? (res.rows[0] as any).value : null;
   }
 
+  // Add a song to a playlist (upsert the song row, append to the playlist),
+  // used to reflect a "like" into the local Liked Music playlist immediately.
+  // Idempotent: re-adding the same song is a no-op on membership (playlist_songs
+  // PK is (playlist_id, video_id)). The playlist row is created if missing so a
+  // brand-new radio discovery can be liked before the account has ever synced.
+  mirrorSong(song: Song, playlistId: string, playlistName: string): void {
+    this.db.executeSync(
+      `INSERT INTO songs (video_id, title, artist, duration_s)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(video_id) DO UPDATE SET
+         title = excluded.title,
+         artist = excluded.artist,
+         duration_s = excluded.duration_s`,
+      [song.videoId, song.title, song.artist, song.durationS],
+    );
+    this.db.executeSync(
+      `INSERT OR IGNORE INTO playlists (playlist_id, name) VALUES (?, ?)`,
+      [playlistId, playlistName],
+    );
+    const res = this.db.executeSync(
+      `SELECT COALESCE(MAX(position), -1) + 1 AS pos FROM playlist_songs WHERE playlist_id = ?`,
+      [playlistId],
+    );
+    const pos = (res.rows[0] as any).pos ?? 0;
+    this.db.executeSync(
+      `INSERT OR IGNORE INTO playlist_songs (playlist_id, video_id, position) VALUES (?, ?, ?)`,
+      [playlistId, song.videoId, pos],
+    );
+  }
+
+  isSongInPlaylist(playlistId: string, videoId: string): boolean {
+    const res = this.db.executeSync(
+      `SELECT 1 FROM playlist_songs WHERE playlist_id = ? AND video_id = ?`,
+      [playlistId, videoId],
+    );
+    return res.rows.length > 0;
+  }
+
+  // One-time cleanup of the retired 'local:liked' ("Liked (flowstate)")
+  // playlist an earlier build created -- likes now go to the real 'LM' Liked
+  // Music playlist instead. Songs themselves are left intact.
+  dropRetiredLocalLiked(): void {
+    this.db.executeSync(`DELETE FROM playlist_songs WHERE playlist_id = 'local:liked'`);
+    this.db.executeSync(`DELETE FROM playlists WHERE playlist_id = 'local:liked'`);
+  }
+
   // Raw handle so FeedbackStore (a thin op-sqlite adapter of its own) can
   // share the same open connection instead of re-opening vibes.db.
   get handle(): DB {
@@ -467,5 +520,7 @@ export async function openVibesDb(): Promise<VibesDb | null> {
   if (!(await RNFS.exists(appDbPath()))) return null;
   const db = open({name: DB_FILENAME, location: RNFS.DocumentDirectoryPath});
   createSchemaIfMissing(db);
-  return new VibesDb(db);
+  const vdb = new VibesDb(db);
+  vdb.dropRetiredLocalLiked(); // one-time: retire 'Liked (flowstate)'
+  return vdb;
 }

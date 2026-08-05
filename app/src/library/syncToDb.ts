@@ -98,7 +98,9 @@ function writeRows(
     // Full replace of playlists + playlist_songs (never features): clear
     // every existing playlist_songs row first (FK-less schema, so order
     // between the two deletes doesn't matter), then the playlists
-    // themselves, then reinsert everything sync just fetched.
+    // themselves, then reinsert everything sync just fetched. A locally-liked
+    // song already lives in the real account's Liked Music, so sync re-fetches
+    // it here -- nothing to preserve.
     handle.executeSync('DELETE FROM playlist_songs');
     handle.executeSync('DELETE FROM playlists');
 

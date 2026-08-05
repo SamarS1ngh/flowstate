@@ -17,6 +17,7 @@ import {openVibesDb, VibesDb} from '../db/vibesDb';
 import {playFrom, reportFallback} from '../player/controller';
 import {SimpleQueue} from '../player/queue';
 import {VibeQueue} from '../engine/vibeQueue';
+import {RadioQueue} from '../engine/radioQueue';
 import {VibeSong} from '../engine/similarity';
 import {FeedbackStore} from '../engine/feedbackStore';
 import {
@@ -65,6 +66,10 @@ export default function PlaylistScreen({route, navigation}: Props) {
   // otherwise capture a stale db=null from first render).
   const dbRef = useRef<VibesDb | null>(null);
   const [vibeMode, setVibeMode] = useState(false);
+  // Playback mode selector: 'vibe' = on-device vibe engine (mood chips +
+  // lock/drift), 'radio' = YouTube song-radio from the tapped song (its own
+  // screen, no vibe chrome). Mutually exclusive, like the vibe on/off toggle.
+  const [mode, setMode] = useState<'vibe' | 'radio'>('vibe');
   const [startingId, setStartingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -255,33 +260,12 @@ export default function PlaylistScreen({route, navigation}: Props) {
     }
   };
 
-  // "Vibe shuffle": starts a vibe session from a random analyzed song
-  // instead of one the user picked -- same VibeQueue construction as tapping
-  // an analyzed row above, just with a randomly-chosen seed. No new engine
-  // behavior, purely a different seed choice.
-  const onVibeShuffle = () => {
-    if (!db || vibeSongs.length === 0) return;
-    const seed = vibeSongs[Math.floor(Math.random() * vibeSongs.length)];
-    try {
-      const feedbackStore = new FeedbackStore(db.handle);
-      feedbackStore.ensureTables();
-      const feedback = feedbackStore.snapshot(Date.now());
-      const queue = new VibeQueue(seed, 'drift', {
-        songs: vibeSongs,
-        feedback,
-        onFallback: reportFallback,
-      });
-      // Navigate to the Player FIRST (instant), then resolve+play in the
-      // background. playFrom sets the now-playing song optimistically, so the
-      // Player shows this song right away with a buffering state -- no waiting
-      // on the network resolve before the screen changes.
-      navigation.navigate('Player');
-      void playFrom(queue, seed.song).catch(e =>
-        Alert.alert('Could not start vibe shuffle', e instanceof Error ? e.message : 'Unknown error'),
-      );
-    } catch (e) {
-      Alert.alert('Could not start vibe shuffle', e instanceof Error ? e.message : 'Unknown error');
-    }
+  // Start an endless YouTube song-radio seeded from `song`, on its own screen.
+  const startRadioFrom = (song: Song) => {
+    navigation.navigate('Radio');
+    void playFrom(new RadioQueue(), song).catch(e =>
+      Alert.alert('Could not start radio', e instanceof Error ? e.message : 'Unknown error'),
+    );
   };
 
   const analyzedCount = vibeSongs.length;
@@ -342,25 +326,46 @@ export default function PlaylistScreen({route, navigation}: Props) {
               </Text>
               <Text style={styles.subtitle}>{subtitle.toUpperCase()}</Text>
 
-              <View style={styles.actionsRow}>
+              <View style={styles.playRow}>
                 <CircleButton
                   icon="play"
                   size={64}
                   iconSize={26}
-                  onPress={() => songs.length > 0 && playIndex(0)}
+                  onPress={() => {
+                    if (songs.length === 0) return;
+                    if (mode === 'radio') startRadioFrom(visibleSongs[0]);
+                    else playIndex(0);
+                  }}
                 />
+              </View>
+              {/* Mode selector: mutually exclusive, exactly one active (like the
+                  vibe on/off toggle below). Radio mode makes a song tap start
+                  YouTube radio instead of a vibe queue. */}
+              <View style={styles.modeSelector}>
                 <Pressable
-                  style={[styles.vibeShuffleButton, vibeSongs.length === 0 && styles.disabled]}
-                  disabled={vibeSongs.length === 0}
-                  onPress={onVibeShuffle}>
-                  <Text style={styles.vibeShuffleText}>✨ VIBE SHUFFLE</Text>
+                  style={[styles.modeBtn, mode === 'vibe' && styles.modeBtnOn]}
+                  onPress={() => setMode('vibe')}>
+                  <Text style={[styles.modeBtnText, mode === 'vibe' && styles.modeBtnTextOn]}>
+                    ✨ VIBE SHUFFLE
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.modeBtn, mode === 'radio' && styles.modeBtnOn]}
+                  onPress={() => setMode('radio')}>
+                  <Text style={[styles.modeBtnText, mode === 'radio' && styles.modeBtnTextOn]}>
+                    📡 RADIO
+                  </Text>
                 </Pressable>
               </View>
 
-              <View style={styles.vibeToggleRow}>
-                <Chip label="Vibe mode: On" active={vibeMode} onPress={() => setVibeMode(true)} tone="accent" />
-                <Chip label="Vibe mode: Off" active={!vibeMode} onPress={() => setVibeMode(false)} />
-              </View>
+              {/* Vibe on/off is a sub-option of vibe mode -- irrelevant in
+                  radio mode (a radio tap never builds a vibe queue). */}
+              {mode === 'vibe' ? (
+                <View style={styles.vibeToggleRow}>
+                  <Chip label="Vibe mode: On" active={vibeMode} onPress={() => setVibeMode(true)} tone="accent" />
+                  <Chip label="Vibe mode: Off" active={!vibeMode} onPress={() => setVibeMode(false)} />
+                </View>
+              ) : null}
 
               {analyzing ? (
                 <View style={styles.analyzeRow}>
@@ -485,7 +490,7 @@ export default function PlaylistScreen({route, navigation}: Props) {
                   : item.artist
               }${item.hasDownload ? ' · ⬇' : ''}`}
               disabled={startingId !== null}
-              onPress={() => playIndex(index)}
+              onPress={() => (mode === 'radio' ? startRadioFrom(item) : playIndex(index))}
               trailing={
                 startingId === item.videoId ? (
                   <ActivityIndicator color={colors.accent} size="small" />
@@ -543,28 +548,36 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginTop: spacing.xs,
   },
-  actionsRow: {
+  playRow: {alignItems: 'center', marginTop: spacing.xl},
+  disabled: {opacity: 0.4},
+  modeSelector: {
     flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: spacing.xl,
+    gap: spacing.sm,
+    alignSelf: 'stretch',
+    marginTop: spacing.lg,
   },
-  vibeShuffleButton: {
-    marginLeft: spacing.lg,
-    backgroundColor: colors.glassFillStrong,
+  modeBtn: {
+    flex: 1,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: colors.glassBorder,
-    paddingHorizontal: spacing.xl,
+    borderColor: colors.border,
+    backgroundColor: 'transparent',
+    paddingHorizontal: spacing.sm,
     paddingVertical: spacing.md,
+    alignItems: 'center',
   },
-  disabled: {opacity: 0.4},
-  vibeShuffleText: {
-    color: colors.neon,
-    fontSize: 12,
+  modeBtnOn: {
+    backgroundColor: colors.glassFillStrong,
+    borderColor: colors.glassBorder,
+  },
+  modeBtnText: {
+    color: colors.textSecondary,
+    fontSize: 11,
     fontWeight: '700',
     fontFamily: 'monospace',
-    letterSpacing: 1,
+    letterSpacing: 0.5,
   },
+  modeBtnTextOn: {color: colors.neon},
   vibeToggleRow: {
     flexDirection: 'row',
     marginTop: spacing.xl,

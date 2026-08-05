@@ -18,9 +18,12 @@ import TrackPlayer, {
 import LibraryScreen from './screens/LibraryScreen';
 import PlaylistScreen from './screens/PlaylistScreen';
 import PlayerScreen from './screens/PlayerScreen';
+import RadioScreen from './screens/RadioScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import LoginScreen from './auth/LoginScreen';
 import {openVibesDb} from './db/vibesDb';
+import {currentSource} from './player/controller';
+import {RadioQueue} from './engine/radioQueue';
 import {prewarmResolver} from './stream/resolver';
 import {FeedbackStore} from './engine/feedbackStore';
 import BottomNav, {BottomNavKey} from './ui/BottomNav';
@@ -31,6 +34,7 @@ export type RootStackParamList = {
   Library: undefined;
   Playlist: {playlistId: string | 'ALL'; playlistName: string};
   Player: undefined;
+  Radio: undefined;
   Settings: undefined;
   Login: undefined;
 };
@@ -44,7 +48,7 @@ const navigationRef = createNavigationContainerRef<RootStackParamList>();
 // into (showing both would be redundant and would eat vertical space from
 // the transport row), and Login is a focused auth flow that shouldn't
 // suggest "you can navigate away, the tabs are still here".
-const SHELL_HIDDEN_ROUTES = new Set<keyof RootStackParamList>(['Player', 'Login']);
+const SHELL_HIDDEN_ROUTES = new Set<keyof RootStackParamList>(['Player', 'Radio', 'Login']);
 
 const navTheme = {
   ...DarkTheme,
@@ -212,7 +216,10 @@ function AppShell() {
   }, []);
 
   const openPlayer = useCallback(() => {
-    if (navigationRef.isReady()) navigationRef.navigate('Player');
+    if (!navigationRef.isReady()) return;
+    // Radio has its own screen; route the mini-player there when the radio
+    // source is what's playing, else the normal player.
+    navigationRef.navigate(currentSource() instanceof RadioQueue ? 'Radio' : 'Player');
   }, []);
 
   const showShell = !SHELL_HIDDEN_ROUTES.has(routeName);
@@ -255,6 +262,11 @@ function AppShell() {
               animation: 'fade',
               animationDuration: 140,
             }}
+          />
+          <Stack.Screen
+            name="Radio"
+            component={RadioScreen}
+            options={{headerShown: false, animation: 'fade', animationDuration: 140}}
           />
           <Stack.Screen
             name="Settings"
