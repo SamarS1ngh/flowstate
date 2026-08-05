@@ -390,6 +390,9 @@ export function cancelAnalysisBatch(): void {
   if (batchState.running) {
     batchState = {...batchState, cancelling: true}; // UI shows "Stopping…" now
     emitBatch();
+  } else {
+    // Paused with the FGS still held (no runBatch loop to release it): do it here.
+    fgsStop();
   }
   signalBatch(); // wake a parked producer/consumer so the loop can exit now
 }
@@ -425,19 +428,76 @@ export function startAnalysisBatch(videoIds: string[], playlistId: string | null
   void runBatch(videoIds, playlistId);
 }
 
-async function runBatch(videoIds: string[], playlistId: string | null): Promise<void> {
-  try {
-    analysisService?.start(NOTIF_TITLE, `0/${videoIds.length}`);
-  } catch {
-    // never let a service hiccup stop analysis
+// Whether the native analysis foreground service is currently held. Kept true
+// across a network/battery PAUSE (see runBatch) so the idle process isn't an
+// easy target for an OEM background killer (e.g. Motorola "SmartBackground",
+// which we caught killing the unprotected process at adj 700) -- and so the
+// in-process NetInfo/AppState listener can resume in place when Wi-Fi/charge
+// returns without needing to start a fresh FGS from the background (disallowed).
+let fgsHeld = false;
+let pauseHoldTimer: ReturnType<typeof setTimeout> | null = null;
+// Don't hold an idle FGS forever -- if a pause drags on past this, release it.
+const PAUSE_HOLD_MS = 12 * 60 * 1000;
+
+function fgsStart(text: string): void {
+  // If one is already held (across a pause), just update it -- re-issuing
+  // startForegroundService() from the background is what Android forbids.
+  if (!fgsHeld) {
+    try {
+      analysisService?.start(NOTIF_TITLE, text);
+    } catch {
+      // never let a service hiccup stop analysis
+    }
+  } else {
+    fgsUpdate(text);
   }
+  fgsHeld = true;
+  if (pauseHoldTimer) {
+    clearTimeout(pauseHoldTimer);
+    pauseHoldTimer = null;
+  }
+}
+function fgsUpdate(text: string): void {
+  try {
+    analysisService?.update(NOTIF_TITLE, text);
+  } catch {
+    // ignore
+  }
+}
+function fgsStop(): void {
+  if (pauseHoldTimer) {
+    clearTimeout(pauseHoldTimer);
+    pauseHoldTimer = null;
+  }
+  try {
+    analysisService?.stop();
+  } catch {
+    // ignore
+  }
+  fgsHeld = false;
+}
+function schedulePauseHoldTimeout(): void {
+  if (pauseHoldTimer) clearTimeout(pauseHoldTimer);
+  pauseHoldTimer = setTimeout(() => {
+    pauseHoldTimer = null;
+    if (!batchState.running) fgsStop(); // still paused after the grace window
+  }, PAUSE_HOLD_MS);
+}
+
+async function runBatch(videoIds: string[], playlistId: string | null): Promise<void> {
+  fgsStart(`0/${videoIds.length}`);
   try {
     await batchLoop(videoIds, playlistId);
   } finally {
-    try {
-      analysisService?.stop();
-    } catch {
-      // ignore
+    // KEEP the FGS if we merely paused (network/battery) -- pendingResume marks
+    // that. Only tear it down on genuine completion or cancel.
+    if (pendingResume) {
+      fgsUpdate(
+        batchState.pausedForBattery ? 'Paused — waiting to charge' : 'Paused — waiting for Wi-Fi',
+      );
+      schedulePauseHoldTimeout();
+    } else {
+      fgsStop();
     }
   }
 }
@@ -592,7 +652,10 @@ function maybeResume(): void {
   if (!autoAnalyzeEnabled && batchState.playlistId === null) return;
   if (!allowedNetworkNow()) return;
   if (!batteryOkNow()) return;
-  if (AppState.currentState !== 'active') return; // never start FGS from bg
+  // Starting a NEW foreground service from the background is disallowed -- but
+  // if one is still held (kept alive across the pause), we can resume in place
+  // even while backgrounded. Only block the from-scratch, background start.
+  if (AppState.currentState !== 'active' && !fgsHeld) return;
   const {ids, playlistId} = pendingResume;
   pendingResume = null;
   startAnalysisBatch(ids, playlistId);
