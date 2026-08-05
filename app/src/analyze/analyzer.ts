@@ -420,12 +420,14 @@ export function startAnalysisBatch(videoIds: string[], playlistId: string | null
   };
   emitBatch();
 
-  // Hold the process foreground (native AnalysisForegroundService) so the loop
-  // keeps running when the app is backgrounded/screen-off, then run the loop
-  // in JS. The service calls startForeground() synchronously in native code,
-  // so there's no JS-timing race (the bug that made the old lib crash). Bare
-  // loop if the module is missing (jest).
-  void runBatch(videoIds, playlistId);
+  // Run the loop as a HEADLESS JS TASK (see AnalysisForegroundService.kt): stash
+  // the job, then start the FGS -- which kicks the "flowstateAnalysis" task, and
+  // RN keeps its JS alive in the background so the loop doesn't stall when the
+  // app is backgrounded / screen-off. Under jest (no native module) there's no
+  // task, so run it inline.
+  headlessJob = {ids: videoIds, playlistId};
+  fgsStart(`0/${videoIds.length}`);
+  if (!analysisService) void runHeadlessAnalysis();
 }
 
 // Whether the native analysis foreground service is currently held. Kept true
@@ -439,17 +441,15 @@ let pauseHoldTimer: ReturnType<typeof setTimeout> | null = null;
 // Don't hold an idle FGS forever -- if a pause drags on past this, release it.
 const PAUSE_HOLD_MS = 12 * 60 * 1000;
 
+// Starts (or, if already running, re-delivers to) the foreground service. The
+// service is a HeadlessJsTaskService, so this ALSO kicks the "flowstateAnalysis"
+// headless JS task that runs the loop -- including on resume, where re-issuing
+// to an already-running FGS is allowed (unlike a fresh from-background start).
 function fgsStart(text: string): void {
-  // If one is already held (across a pause), just update it -- re-issuing
-  // startForegroundService() from the background is what Android forbids.
-  if (!fgsHeld) {
-    try {
-      analysisService?.start(NOTIF_TITLE, text);
-    } catch {
-      // never let a service hiccup stop analysis
-    }
-  } else {
-    fgsUpdate(text);
+  try {
+    analysisService?.start(NOTIF_TITLE, text);
+  } catch {
+    // never let a service hiccup stop analysis
   }
   fgsHeld = true;
   if (pauseHoldTimer) {
@@ -484,10 +484,23 @@ function schedulePauseHoldTimeout(): void {
   }, PAUSE_HOLD_MS);
 }
 
-async function runBatch(videoIds: string[], playlistId: string | null): Promise<void> {
-  fgsStart(`0/${videoIds.length}`);
+// The job the headless task should run next (set by startAnalysisBatch just
+// before it kicks the service). Claimed (read-and-cleared) by runHeadlessAnalysis
+// so it runs exactly once even if the task is triggered more than once.
+let headlessJob: {ids: string[]; playlistId: string | null} | null = null;
+
+/**
+ * Body of the "flowstateAnalysis" headless JS task (registered in index.js).
+ * RN keeps the JS runtime alive while this promise is pending -- which is what
+ * lets the loop keep issuing work when the app is backgrounded. Runs the batch,
+ * then keeps the FGS on a pause / tears it down on completion (same as before).
+ */
+export async function runHeadlessAnalysis(): Promise<void> {
+  const job = headlessJob;
+  headlessJob = null;
+  if (!job || !batchState.running) return;
   try {
-    await batchLoop(videoIds, playlistId);
+    await batchLoop(job.ids, job.playlistId);
   } finally {
     // KEEP the FGS if we merely paused (network/battery) -- pendingResume marks
     // that. Only tear it down on genuine completion or cancel.

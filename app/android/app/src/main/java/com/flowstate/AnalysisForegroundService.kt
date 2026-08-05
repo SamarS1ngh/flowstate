@@ -4,12 +4,13 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.os.IBinder
+import com.facebook.react.HeadlessJsTaskService
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.jstasks.HeadlessJsTaskConfig
 import android.os.PowerManager
 
 /**
@@ -29,7 +30,22 @@ import android.os.PowerManager
  * Controlled via startService intents with an ACTION extra: START (with a
  * title/text), UPDATE (new text), STOP.
  */
-class AnalysisForegroundService : Service() {
+class AnalysisForegroundService : HeadlessJsTaskService() {
+    // Runs the JS analysis loop as a HEADLESS JS TASK (not the normal app JS
+    // instance). RN keeps the JS runtime alive for a headless task while its
+    // promise is pending -- which is what lets the loop keep issuing work when
+    // the app is backgrounded / the screen is off (the normal app JS gets
+    // starved there, so the loop stalled after 1-2 songs). The heavy work
+    // (decode/mel/TFLite) was already fine in the background; only the JS loop
+    // driving it needed to stay awake.
+    override fun getTaskConfig(intent: Intent?): HeadlessJsTaskConfig? {
+        if (intent?.getStringExtra(EXTRA_ACTION) == ACTION_STOP) return null
+        // timeout 0 = run until the task's own promise resolves (batch done /
+        // paused / cancelled); allowedInForeground = true so it also runs while
+        // the app is open.
+        return HeadlessJsTaskConfig("flowstateAnalysis", Arguments.createMap(), 0, true)
+    }
+
     // Partial wake lock held for the service's lifetime. A foreground service
     // stops Android from KILLING the process, but it does NOT keep the CPU
     // awake once the screen is off -- and analysis is pure CPU work (audio
@@ -43,28 +59,23 @@ class AnalysisForegroundService : Service() {
     // keep flowing.
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
-    override fun onBind(intent: Intent?): IBinder? = null
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.getStringExtra(EXTRA_ACTION)) {
-            ACTION_STOP -> {
-                releaseWakeLock()
-                releaseWifiLock()
-                stopForegroundCompat()
-                stopSelf()
-                return START_NOT_STICKY
-            }
-            else -> {
-                val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Analyzing your music"
-                val text = intent?.getStringExtra(EXTRA_TEXT) ?: ""
-                // MUST be called synchronously here (within 5s of the
-                // startForegroundService that triggered this) -- this is the
-                // whole point of the native service.
-                startForegroundCompat(buildNotification(this, title, text))
-                acquireWakeLock()
-                acquireWifiLock()
-            }
+        if (intent?.getStringExtra(EXTRA_ACTION) == ACTION_STOP) {
+            releaseWakeLock()
+            releaseWifiLock()
+            stopForegroundCompat()
+            stopSelf()
+            return START_NOT_STICKY
         }
+        val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Analyzing your music"
+        val text = intent?.getStringExtra(EXTRA_TEXT) ?: ""
+        // MUST be called synchronously here (within 5s of the
+        // startForegroundService that triggered this).
+        startForegroundCompat(buildNotification(this, title, text))
+        acquireWakeLock()
+        acquireWifiLock()
+        // Kick the headless JS task (getTaskConfig above provides its config).
+        super.onStartCommand(intent, flags, startId)
         return START_STICKY
     }
 
