@@ -41,6 +41,7 @@ import {
   activeVideoId,
   currentSource,
   consumeFallbackStatus,
+  invalidateWindow,
   isRepeatOne,
   nowPlaying,
   peekNextSong,
@@ -293,6 +294,8 @@ export default function PlayerScreen({navigation}: Props) {
     if (!(src instanceof VibeQueue)) return;
     src.setMode(src.label === 'vibe:lock' ? 'drift' : 'lock');
     bump();
+    // Re-pick the already-preloaded next for the new mode; refresh Up Next when done.
+    void invalidateWindow().then(bump);
   };
 
   const onToggleMood = (key: string) => {
@@ -300,6 +303,7 @@ export default function PlayerScreen({navigation}: Props) {
     const next = selectedMood === key ? null : key;
     setSelectedMood(next);
     src.setMoodFilter(next ? {key: next, min: 0.5} : null);
+    void invalidateWindow().then(bump); // re-pick the preloaded next for the new mood
   };
 
   const onDoesntFit = async () => {

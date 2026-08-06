@@ -35,6 +35,11 @@ jest.mock('react-native-track-player', () => ({
       if (mockState.active > 0) mockState.active -= 1;
     }),
     getActiveTrackIndex: jest.fn(async () => mockState.active),
+    getQueue: jest.fn(async () => mockState.queue.map((id: string) => ({id}))),
+    removeUpcomingTracks: jest.fn(async () => {
+      // Drop everything after the active track (never the playing one).
+      mockState.queue = mockState.queue.slice(0, mockState.active + 1);
+    }),
     getActiveTrack: jest.fn(async () => {
       const id = mockState.queue[mockState.active];
       return id != null ? {id} : undefined;
@@ -81,6 +86,7 @@ import {
   peekNextSong,
   nowPlaying,
   consumeFallbackStatus,
+  invalidateWindow,
   _resetControllerForTests,
 } from '../src/player/controller';
 
@@ -135,6 +141,20 @@ class EndlessSource implements QueueSource {
     return song(`s${this.n}`);
   }
   reset(_s: Song): void {}
+}
+
+// A source whose next pick can flip at runtime -- stands in for a VibeQueue
+// whose mood/lock-drift change alters what it will pick next.
+class SwitchSource implements QueueSource {
+  label = 'switch';
+  pick = 'b';
+  reset(_s: Song): void {}
+  next(_l: Song | null): Song | null {
+    return song(this.pick);
+  }
+  peekNext(): Song | null {
+    return song(this.pick);
+  }
 }
 
 beforeEach(() => {
@@ -322,6 +342,24 @@ describe('failure handling', () => {
     expect(nowPlaying()?.videoId).toBe('seed'); // stayed on the chosen song
     expect(tp.stop).toHaveBeenCalled();
     expect(consumeFallbackStatus()).toBe('error');
+  });
+
+  test('invalidateWindow drops the stale preloaded next and re-picks a fresh one', async () => {
+    const s = new SwitchSource();
+    await playFrom(s, song('a'));
+    await settle();
+    expect(addedContains('b')).toBe(true); // 'b' preloaded
+    expect(peekNextSong()?.videoId).toBe('b');
+
+    // Mood/mode change -> the source would now pick 'x' next.
+    s.pick = 'x';
+    await invalidateWindow();
+    await settle();
+
+    // The stale 'b' is dropped from the player queue and 'x' preloaded instead.
+    expect(tp.removeUpcomingTracks).toHaveBeenCalled();
+    expect(addedContains('x')).toBe(true);
+    expect(peekNextSong()?.videoId).toBe('x');
   });
 
   test('end of queue: PlaybackQueueEnded with no next does not throw', async () => {

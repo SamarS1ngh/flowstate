@@ -382,6 +382,47 @@ export function handlePlaybackError(): Promise<void> {
   });
 }
 
+// Discard the preloaded "next" and re-pick it from the source. The vibe
+// controls (mood filter, lock/drift, reject) change what the source will pick
+// NEXT -- but by then we've usually already preloaded the OLD pick into
+// ExoPlayer's queue (windowNextId) and committed it onto the timeline, so the
+// change wouldn't take effect until a song or two later. This drops that stale
+// preload from the player, trims the timeline frontier back to the active
+// song, and re-preloads a fresh pick so the change lands on the very next
+// advance. Only touches songs AFTER the active one -- current playback is
+// untouched.
+export async function invalidateWindow(): Promise<void> {
+  await serialize(async () => {
+    if (!source || !current) return;
+    // Only safe to touch the queue when the active track is really the one we
+    // think is current -- otherwise a mid-transition remove could drop the
+    // wrong track. If they disagree, skip (a fresh window will form on the
+    // next natural advance anyway).
+    let activeId: string | undefined;
+    try {
+      const t = await TrackPlayer.getActiveTrack();
+      activeId = (t as {id?: string} | undefined)?.id;
+    } catch {
+      return;
+    }
+    if (activeId !== current.videoId) return;
+    // Drop everything queued AFTER the active track (the stale preload). This
+    // is the purpose-built, index-safe API -- it never removes the playing
+    // track, so current playback is untouched.
+    try {
+      await TrackPlayer.removeUpcomingTracks();
+    } catch {
+      // best-effort; clearing windowNextId below still forces a fresh re-pick
+    }
+    windowNextId = null;
+    timeline = timeline.slice(0, activePos + 1);
+    if (pos > activePos) pos = activePos;
+    await preloadNext();
+    requestPrefetch(source.peekNext?.() ?? null);
+    emitNowPlaying();
+  });
+}
+
 // Called on PlaybackQueueEnded -- a genuine end (nothing preloaded). Try once
 // more to extend + advance, else leave stopped. Repeat-one is native.
 export async function handleQueueEnded(): Promise<void> {
