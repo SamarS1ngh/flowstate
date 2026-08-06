@@ -261,16 +261,23 @@ export default function PlayerScreen({navigation}: Props) {
   // "Loading" = we have a target song (optimistic open / skip) but the audio
   // isn't actually playing yet -- it's still resolving or buffering. Show a
   // spinner on the transport button until it truly plays, so the first song
-  // doesn't look "playing" (or paused) before any sound comes out. Paused /
-  // stopped / errored are NOT loading -- those show the normal play button.
+  // doesn't look "playing" (or paused) before any sound comes out.
+  //
+  // CRITICAL: also treat "the shown song isn't the active track yet" as
+  // loading. On a skip, scheduleSeek() PAUSES the player during the debounce +
+  // resolve, so pbState is Paused while the new song is still being loaded --
+  // without this, the transport would show a Play button (reads as "paused,
+  // tap to play") for that whole window even though it's actually loading.
   const pbState = playbackState.state;
+  const notActiveYet = !!song && song.videoId !== activeVideoId();
   const isLoading =
     !!song &&
-    (pbState === State.None ||
+    fallbackStatus !== 'error' &&
+    (notActiveYet ||
+      pbState === State.None ||
       pbState === State.Loading ||
       pbState === State.Buffering ||
-      pbState === State.Ready) &&
-    fallbackStatus !== 'error';
+      pbState === State.Ready);
   const isLock = src instanceof VibeQueue && src.label === 'vibe:lock';
 
   // Up Next: SimpleQueue's order is fully known, so peek several ahead. VibeQueue
@@ -348,7 +355,7 @@ export default function PlayerScreen({navigation}: Props) {
       return;
     }
     try {
-      setLiked(vibesDb.isSongInPlaylist(LIKED_PLAYLIST_ID, song.videoId));
+      setLiked(vibesDb.isLikedSong(song));
     } catch {
       setLiked(false);
     }

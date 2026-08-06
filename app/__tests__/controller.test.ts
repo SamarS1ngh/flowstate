@@ -313,11 +313,13 @@ describe('repeat-one', () => {
 });
 
 describe('failure handling', () => {
-  test('first-load caps consecutive resolve failures instead of looping forever', async () => {
+  test('a failed first load stops ON the song and flags error -- no auto-jump', async () => {
     resolveMock.mockRejectedValue(new Error('offline'));
     await playFrom(new EndlessSource(), song('seed'));
     await settle();
-    expect(resolveMock).toHaveBeenCalledTimes(5); // capped
+    // Must NOT churn through the library trying other songs.
+    expect(resolveMock.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(nowPlaying()?.videoId).toBe('seed'); // stayed on the chosen song
     expect(tp.stop).toHaveBeenCalled();
     expect(consumeFallbackStatus()).toBe('error');
   });
@@ -326,5 +328,31 @@ describe('failure handling', () => {
     await playFrom(new ListSource(['a']), song('a'));
     await settle();
     await expect(handleQueueEnded()).resolves.toBeUndefined();
+  });
+
+  // Regression: a track can end WHILE its successor is still being resolved
+  // (slow network / search-fallback). handleQueueEnded must await that in-flight
+  // preload and then advance -- not see a momentary "nothing preloaded" and
+  // stop dead (the rare "doesn't move to next after completion" bug).
+  test('queue ends mid-preload: awaits the in-flight resolve, then advances', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
+    await settle();
+
+    // Make the follow-up preload of 'c' (kicked when we land on 'b') hang.
+    let releaseC: (v: {url: string; headers: Record<string, string>}) => void = () => {};
+    resolveMock.mockImplementationOnce(
+      () => new Promise(res => (releaseC = res)),
+    );
+    await autoAdvance(); // now on 'b'; preload of 'c' is in-flight (hung)
+    expect(addedContains('c')).toBe(false);
+
+    // 'b' ends before 'c' finished preloading.
+    const ended = handleQueueEnded();
+    releaseC({url: 'https://example.com/s.mp3', headers: {}});
+    await ended;
+    await settle();
+
+    expect(addedContains('c')).toBe(true);
+    expect(nowPlaying()?.videoId).toBe('c');
   });
 });

@@ -4,6 +4,7 @@ import {resolveStreamUrl, StreamResolveError} from '../stream/resolver';
 import {offlineUrl} from '../offline/downloads';
 import {getPrefetchedStream, requestPrefetch} from './prefetchCache';
 import {QueueSource} from './queue';
+import {thumbUrl} from '../ui/thumb';
 
 // ── Timeline navigation model ─────────────────────────────────────────────────
 //
@@ -35,7 +36,9 @@ let activePos = 0; // where the player is actually loaded/playing
 // or null. When set it equals timeline[activePos + 1].
 let windowNextId: string | null = null;
 let repeatOne = false;
-let preloading = false;
+// In-flight single-flight preload (null when idle). Shared so awaiters wait on
+// the same resolve rather than racing it.
+let preloadPromise: Promise<void> | null = null;
 
 type Stream = {url: string; headers?: Record<string, string>};
 
@@ -83,6 +86,10 @@ function toTrack(song: Song, stream: Stream) {
     title: song.title,
     artist: song.artist,
     duration: song.durationS ?? undefined,
+    // Album art for the media notification / lock screen. Without this the
+    // notification renders as a plain gray card; with it Android shows the
+    // artwork and tints the notification from it (MediaStyle).
+    artwork: thumbUrl(song.videoId),
   };
 }
 
@@ -101,7 +108,6 @@ export function consumeFallbackStatus(): FallbackKind | null {
   return k;
 }
 
-const MAX_CONSECUTIVE_LOAD_FAILURES = 5;
 
 // ── Seek debounce (shared by next + previous) ─────────────────────────────────
 const SEEK_DEBOUNCE_MS = 250;
@@ -177,23 +183,31 @@ async function loadCurrent(song: Song): Promise<boolean> {
 
 // Preload the next song into ExoPlayer's queue so a track ending advances
 // natively (no reset, no gap) -- keeps the media FGS + wake lock held, so
-// playback continues with the screen locked. Single-flight.
-async function preloadNext(): Promise<void> {
-  if (preloading || windowNextId) return;
-  preloading = true;
-  try {
-    const nx = nextAfterActive();
-    if (!nx) return;
-    const stream = await resolveStream(nx);
-    if (windowNextId) return; // someone else won the race
-    await TrackPlayer.add(toTrack(nx, stream));
-    windowNextId = nx.videoId;
-    emitNowPlaying(); // Up Next can now show it
-  } catch {
-    // leave unloaded; a genuine end just fires PlaybackQueueEnded
-  } finally {
-    preloading = false;
-  }
+// playback continues with the screen locked. Single-flight: concurrent callers
+// share (and can AWAIT) the one in-flight resolve. This matters at the queue
+// boundary -- handleQueueEnded awaits this, and if a preload was already
+// mid-resolve it must wait for THAT to finish (and set windowNextId) rather
+// than see a false "nothing preloaded" and stop playback (the rare
+// end-of-track-doesn't-advance bug).
+function preloadNext(): Promise<void> {
+  if (windowNextId) return Promise.resolve();
+  if (preloadPromise) return preloadPromise;
+  preloadPromise = (async () => {
+    try {
+      const nx = nextAfterActive();
+      if (!nx) return;
+      const stream = await resolveStream(nx);
+      if (windowNextId) return; // someone else won the race
+      await TrackPlayer.add(toTrack(nx, stream));
+      windowNextId = nx.videoId;
+      emitNowPlaying(); // Up Next can now show it
+    } catch {
+      // leave unloaded; a genuine end just fires PlaybackQueueEnded
+    } finally {
+      preloadPromise = null;
+    }
+  })();
+  return preloadPromise;
 }
 
 // Reconcile `current`/`activePos` to whatever ExoPlayer is ACTUALLY playing,
@@ -247,26 +261,18 @@ export function playFrom(src: QueueSource, first: Song): Promise<void> {
     current = first;
     emitNowPlaying(); // optimistic: show the tapped song immediately
 
-    let ok = await loadCurrent(first);
-    let fails = 0;
-    while (!ok) {
-      fails += 1;
-      if (fails >= MAX_CONSECUTIVE_LOAD_FAILURES) {
-        fallbackBySong.set(current?.videoId ?? first.videoId, 'error');
-        emitNowPlaying();
-        await TrackPlayer.stop();
-        return;
-      }
-      const nx = extendTimeline();
-      if (!nx) {
-        await TrackPlayer.stop();
-        return;
-      }
-      pos = timeline.length - 1;
-      activePos = pos;
-      current = nx;
+    // Do NOT auto-jump through the library on failure. If the chosen song
+    // can't load (dead id, or -- far more often -- a flaky/slow connection),
+    // stop ON THAT song and flag the error so the UI can offer retry/skip.
+    // The old behaviour churned through up to 5 songs, each with its own slow
+    // resolve, then errored anyway -- a terrible cascade on a bad network.
+    // A failed song is the user's to skip, not the app's.
+    const ok = await loadCurrent(first);
+    if (!ok) {
+      fallbackBySong.set(first.videoId, 'error');
       emitNowPlaying();
-      ok = await loadCurrent(nx);
+      await TrackPlayer.stop();
+      return;
     }
     await preloadNext();
     // Warm the URL of the song after the window for a snappy following advance.
@@ -340,6 +346,14 @@ function commitSeek(): void {
       if (ok) {
         activePos = targetPos;
         await preloadNext();
+      } else {
+        // Landed on a song that won't load -> flag the error and stop here
+        // rather than leaving an endless spinner. The user chose this song;
+        // let them retry or skip again, don't silently churn onward.
+        activePos = targetPos;
+        fallbackBySong.set(target.videoId, 'error');
+        emitNowPlaying();
+        await TrackPlayer.stop().catch(() => {});
       }
     }
   });
@@ -350,6 +364,22 @@ function commitSeek(): void {
 export function onActiveTrackChanged(): Promise<void> {
   if (seekActive) return Promise.resolve();
   return serialize(reconcileActive);
+}
+
+// Called on PlaybackError -- ExoPlayer failed to play the active track (e.g. a
+// preloaded URL turned out dead, or the connection dropped mid-stream). Flag
+// the error on the current song and STOP rather than stalling on an endless
+// spinner or churning onward. Ignored mid-seek (a reset/re-add can briefly
+// surface a transient error that isn't real).
+export function handlePlaybackError(): Promise<void> {
+  if (seekActive) return Promise.resolve();
+  return serialize(async () => {
+    if (current) {
+      fallbackBySong.set(current.videoId, 'error');
+      emitNowPlaying();
+    }
+    await TrackPlayer.stop().catch(() => {});
+  });
 }
 
 // Called on PlaybackQueueEnded -- a genuine end (nothing preloaded). Try once
@@ -423,7 +453,7 @@ export function _resetControllerForTests(): void {
   activePos = 0;
   windowNextId = null;
   repeatOne = false;
-  preloading = false;
+  preloadPromise = null;
   pendingFallback = null;
   fallbackBySong.clear();
   cancelSeek();

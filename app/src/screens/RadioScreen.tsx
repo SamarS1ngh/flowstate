@@ -105,7 +105,7 @@ export default function RadioScreen({navigation}: Props) {
       return;
     }
     try {
-      setLiked(vibesDb.isSongInPlaylist(LIKED_PLAYLIST_ID, song.videoId));
+      setLiked(vibesDb.isLikedSong(song));
     } catch {
       setLiked(false);
     }
@@ -142,14 +142,17 @@ export default function RadioScreen({navigation}: Props) {
   );
 
   const pbState = playbackState.state;
+  const settled = song != null && song.videoId === activeVideoId();
+  // Show the spinner (not a Play button) whenever the shown song isn't the
+  // active track yet -- a skip pauses the player while the next song resolves,
+  // which would otherwise read as "paused, tap to play". See PlayerScreen.
   const isLoading =
     !!song &&
-    (pbState === State.None ||
+    (!settled ||
+      pbState === State.None ||
       pbState === State.Loading ||
       pbState === State.Buffering ||
       pbState === State.Ready);
-
-  const settled = song != null && song.videoId === activeVideoId();
   const rawDuration = progress.duration > 0 ? progress.duration : 0;
   const duration = settled ? rawDuration : song?.durationS ?? 0;
   const sliderMax = duration > 0 ? duration : 1;

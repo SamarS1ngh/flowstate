@@ -1,5 +1,6 @@
 import TrackPlayer, {Event} from 'react-native-track-player';
 import {
+  handlePlaybackError,
   handleQueueEnded,
   onActiveTrackChanged,
   skipToNext,
@@ -39,4 +40,7 @@ export async function playbackService(): Promise<void> {
   // Genuine end of the queue (source exhausted). Repeat-one is handled natively
   // via RepeatMode.Track, so this is only the real end.
   TrackPlayer.addEventListener(Event.PlaybackQueueEnded, () => handleQueueEnded());
+  // ExoPlayer failed to play the active track (dead URL, connection dropped) --
+  // flag the error + stop instead of stalling/churning. See controller.
+  TrackPlayer.addEventListener(Event.PlaybackError, () => handlePlaybackError());
 }

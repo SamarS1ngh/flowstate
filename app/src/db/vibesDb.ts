@@ -375,6 +375,24 @@ export class VibesDb {
     return res.rows.length > 0;
   }
 
+  // Whether a song counts as "liked" (in the Liked Music playlist). Matches by
+  // videoId OR by exact (title, artist) -- YouTube Music stores the same song
+  // under a DIFFERENT videoId in different playlists, so the copy you're
+  // playing (from All songs / another playlist) can have a different id than
+  // the one in Liked Music. The title+artist fallback makes the heart reflect
+  // "this song is liked" regardless of which id instance is playing.
+  isLikedSong(song: {videoId: string; title: string; artist: string}): boolean {
+    const res = this.db.executeSync(
+      `SELECT 1 FROM playlist_songs ps
+       JOIN songs s USING (video_id)
+       WHERE ps.playlist_id = ?
+         AND (s.video_id = ? OR (s.title = ? AND s.artist = ?))
+       LIMIT 1`,
+      [LIKED_PLAYLIST_ID, song.videoId, song.title, song.artist],
+    );
+    return res.rows.length > 0;
+  }
+
   // One-time cleanup of the retired 'local:liked' ("Liked (flowstate)")
   // playlist an earlier build created -- likes now go to the real 'LM' Liked
   // Music playlist instead. Songs themselves are left intact.

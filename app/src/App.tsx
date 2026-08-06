@@ -124,6 +124,14 @@ export default function App() {
             maxBuffer: 50,
             playBuffer: 0.75,
             backBuffer: 0,
+            // Request audio focus and auto-pause on interruptions the way every
+            // other music app does: a phone call, or another app that plays
+            // audio/video (Instagram reels, YouTube, Google Photos...) grabbing
+            // focus pauses us; when it ends and focus returns (transient loss,
+            // e.g. call hang-up), playback resumes. A permanent loss (another
+            // music app takes over) pauses without auto-resume. ExoPlayer also
+            // ducks (lowers volume) for short transient-may-duck interruptions.
+            autoHandleInterruptions: true,
           });
         } catch (e) {
           if (!isPlayerAlreadyInitializedError(e)) throw e;
@@ -135,6 +143,8 @@ export default function App() {
             appKilledPlaybackBehavior:
               AppKilledPlaybackBehavior.ContinuePlayback,
           },
+          // Neon accent for the media notification (matches the app's HUD).
+          color: 0xc85cff,
           capabilities: [
             Capability.Play,
             Capability.Pause,

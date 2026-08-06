@@ -165,7 +165,7 @@ export interface ResolvedStream {
   headers: Record<string, string>;
 }
 
-const VALIDATE_TIMEOUT_MS = 8000;
+const VALIDATE_TIMEOUT_MS = 5000;
 
 // Confirms the URL is actually fully fetchable before handing it to the
 // player, using the SAME request shape ExoPlayer's progressive HTTP data
@@ -197,6 +197,14 @@ async function validateUrl(url: string, headers: Record<string, string>): Promis
   }
 }
 
+// Session cache: an original (often unplayable "- Topic") videoId -> a videoId
+// that actually streamed for it, discovered once via the slow search fallback.
+// A later play of the same song then resolves the known-good id directly and
+// skips the search entirely -- the biggest win for a library full of "- Topic"
+// entries, which the user replays constantly. Session-scoped (fine: the mapping
+// is stable and cheap to rediscover after a restart).
+const altIdCache = new Map<string, string>();
+
 export async function resolveStreamUrl(
   videoId: string,
   opts: {quality?: 'highest' | 'lowest'; title?: string; artist?: string} = {},
@@ -207,6 +215,14 @@ export async function resolveStreamUrl(
     tube = await innertube();
   } catch (e) {
     throw new StreamResolveError('session bootstrap failed: ' + String(e), {cause: e});
+  }
+
+  // 0) Known-good alternate from a previous search fallback this session.
+  const cachedAlt = altIdCache.get(videoId);
+  if (cachedAlt) {
+    const viaCache = await tryAllClients(tube, cachedAlt, quality);
+    if (viaCache) return viaCache;
+    altIdCache.delete(videoId); // stale alternate; fall through to a fresh resolve
   }
 
   // 1) Try the exact videoId across all clients.
@@ -223,7 +239,10 @@ export async function resolveStreamUrl(
   // otherwise permanently "failed"/unplayable. Requires title (artist helps).
   if (opts.title) {
     const viaSearch = await resolveViaSearch(tube, videoId, opts.title, opts.artist, quality);
-    if (viaSearch) return viaSearch;
+    if (viaSearch) {
+      altIdCache.set(videoId, viaSearch.id); // remember for next time
+      return viaSearch.stream;
+    }
   }
 
   // Reset the cached singleton so the next call re-bootstraps fresh.
@@ -249,19 +268,22 @@ async function tryAllClients(
   return null;
 }
 
-/** Search "title artist" and return a stream for the first result (other than
- * the original, unplayable id) that actually streams. */
+/** Search for the song and return a stream for the first result (other than
+ * the original, unplayable id) that actually streams. Query appends "lyrics"
+ * to bias toward LYRIC videos -- those carry the accurate studio recording,
+ * so the fallback doesn't grab a cover / live version / sped-up edit with the
+ * same title (the exact risk of matching by plain title+artist). */
 async function resolveViaSearch(
   tube: Innertube,
   originalId: string,
   title: string,
   artist: string | undefined,
   quality: 'highest' | 'lowest',
-): Promise<ResolvedStream | null> {
+): Promise<{stream: ResolvedStream; id: string} | null> {
   // Drop the auto-generated "- Topic" suffix from the artist so the query is
   // natural ("Ali Sethi" not "Ali Sethi - Topic").
   const cleanArtist = (artist ?? '').replace(/\s*-\s*Topic\s*$/i, '').trim();
-  const query = cleanArtist ? `${title} ${cleanArtist}` : title;
+  const query = cleanArtist ? `${title} ${cleanArtist} lyrics` : `${title} lyrics`;
   let results: Array<{id?: string; video_id?: string}> = [];
   try {
     const res: any = await tube.search(query, {type: 'video'});
@@ -276,7 +298,7 @@ async function resolveViaSearch(
     if (tried >= SEARCH_FALLBACK_MAX) break;
     tried += 1;
     const got = await tryAllClients(tube, id, quality);
-    if (got) return got;
+    if (got) return {stream: got, id};
   }
   return null;
 }
@@ -284,7 +306,7 @@ async function resolveViaSearch(
 // How many search results to probe before giving up -- keeps the fallback
 // bounded (each probe is a player request). The canonical upload almost
 // always ranks in the first couple, so a few is plenty.
-const SEARCH_FALLBACK_MAX = 5;
+const SEARCH_FALLBACK_MAX = 3;
 
 /**
  * Pull a validated, playable stream out of one Innertube session/client, or
@@ -320,5 +342,11 @@ async function extractStream(
   if (typeof url !== 'string' || url.length === 0) {
     throw new StreamResolveError('format had no URL after decipher');
   }
+  // ANDROID_VR has no GVS Proof-of-Origin cap (unlike IOS, which is capped to
+  // ~1 MiB without a PoT), so its direct URL is reliable as-is -- skip the
+  // extra validation GET (a whole round trip, expensive on slow/roaming/DoT
+  // networks). Only IOS needs the 1-MiB-cap check. A rare bad ANDROID_VR URL
+  // is still caught downstream by the controller's resolve/skip retry.
+  if (client === 'ANDROID_VR') return {url, headers};
   return (await validateUrl(url, headers)) ? {url, headers} : null;
 }

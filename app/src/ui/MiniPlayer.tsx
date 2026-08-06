@@ -1,6 +1,6 @@
 import React from 'react';
 import {Pressable, StyleSheet, Text, View} from 'react-native';
-import {State, usePlaybackState} from 'react-native-track-player';
+import {State, usePlaybackState, useProgress} from 'react-native-track-player';
 import Thumbnail from './Thumbnail';
 import IconButton from './IconButton';
 import {colors, miniPlayerHeight, radii, spacing, thumbSize} from './theme';
@@ -15,10 +15,16 @@ import {useNowPlayingSong} from './useNowPlaying';
 export default function MiniPlayer({onPress}: {onPress: () => void}) {
   const song = useNowPlayingSong();
   const playbackState = usePlaybackState();
+  const progress = useProgress(500);
 
   if (!song) return null; // nothing loaded yet this session -- nothing to show
 
   const isPlaying = playbackState.state === State.Playing;
+  // Thin progress line along the bottom edge. Fall back to the song's known
+  // duration until the player reports a real one, so the bar isn't stuck empty
+  // during the first moments of a track.
+  const dur = progress.duration > 0 ? progress.duration : song.durationS ?? 0;
+  const pct = dur > 0 ? Math.max(0, Math.min(1, progress.position / dur)) : 0;
 
   return (
     <Pressable onPress={onPress} style={({pressed}) => [styles.bar, pressed && styles.pressed]}>
@@ -46,6 +52,10 @@ export default function MiniPlayer({onPress}: {onPress: () => void}) {
         color={colors.neon}
         hitSlop={8}
       />
+      {/* Playback progress along the bottom edge (timer bar). */}
+      <View style={styles.progressTrack}>
+        <View style={[styles.progressFill, {width: `${pct * 100}%`}]} />
+      </View>
     </Pressable>
   );
 }
@@ -78,4 +88,13 @@ const styles = StyleSheet.create({
   pip: {width: 6, height: 6, borderRadius: 3, marginRight: spacing.sm},
   title: {flex: 1, color: colors.textPrimary, fontSize: 13, fontWeight: '700', fontFamily: 'monospace'},
   artist: {color: colors.textSecondary, fontSize: 11, marginTop: 2, fontFamily: 'monospace'},
+  progressTrack: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 2,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  progressFill: {height: 2, backgroundColor: colors.neon},
 });
