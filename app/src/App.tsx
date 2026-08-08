@@ -1,5 +1,5 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
-import {PermissionsAndroid, Platform, StyleSheet, Text, View} from 'react-native';
+import {AppState, PermissionsAndroid, Platform, StyleSheet, Text, View} from 'react-native';
 import {GestureHandlerRootView} from 'react-native-gesture-handler';
 import {
   createNavigationContainerRef,
@@ -22,7 +22,7 @@ import RadioScreen from './screens/RadioScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import LoginScreen from './auth/LoginScreen';
 import {openVibesDb} from './db/vibesDb';
-import {currentSource} from './player/controller';
+import {currentSource, expireStaleSession} from './player/controller';
 import {RadioQueue} from './engine/radioQueue';
 import {prewarmResolver} from './stream/resolver';
 import {FeedbackStore} from './engine/feedbackStore';
@@ -167,6 +167,10 @@ export default function App() {
         // is harmless.
         const db = await openVibesDb();
         if (db) new FeedbackStore(db.handle).ensureTables();
+        // Cold start: if ContinuePlayback left a stale (paused, hours-old)
+        // session alive, drop it now -- before the mini player renders -- so
+        // relaunching after a long time doesn't resurrect the last song.
+        void expireStaleSession();
       } catch (e) {
         // Anything else (corrupt vibes.db, updateOptions failure, an
         // unexpected setupPlayer rejection, ...) is non-fatal to boot: the
@@ -177,6 +181,14 @@ export default function App() {
         setReady(true);
       }
     })();
+
+    // On every return to the foreground, re-check staleness: a session left
+    // paused and idle past the threshold gets dropped so the mini player
+    // doesn't keep showing a song from a much earlier session.
+    const sub = AppState.addEventListener('change', s => {
+      if (s === 'active') void expireStaleSession();
+    });
+    return () => sub.remove();
   }, []);
 
   if (!ready) {

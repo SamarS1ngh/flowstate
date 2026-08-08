@@ -25,8 +25,11 @@ import {
 export async function playbackService(): Promise<void> {
   TrackPlayer.addEventListener(Event.RemotePlay, () => TrackPlayer.play());
   TrackPlayer.addEventListener(Event.RemotePause, () => TrackPlayer.pause());
-  TrackPlayer.addEventListener(Event.RemoteNext, () => skipToNext());
-  TrackPlayer.addEventListener(Event.RemotePrevious, () => skipToPrevious());
+  // immediate=true: commit the skip now, not via the debounce timer -- remote
+  // skips must work while the app is backgrounded, where JS timers are frozen
+  // (see controller.scheduleSeek).
+  TrackPlayer.addEventListener(Event.RemoteNext, () => skipToNext(true));
+  TrackPlayer.addEventListener(Event.RemotePrevious, () => skipToPrevious(true));
   TrackPlayer.addEventListener(Event.RemoteStop, () => TrackPlayer.stop());
   // Native auto-advance: when a track ends, ExoPlayer moves to the pre-loaded
   // next track in its queue and fires this -- the ONLY signal for a

@@ -1,9 +1,11 @@
-import TrackPlayer, {RepeatMode} from 'react-native-track-player';
+import TrackPlayer, {RepeatMode, State} from 'react-native-track-player';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {Song} from '../types';
 import {resolveStreamUrl, StreamResolveError} from '../stream/resolver';
 import {offlineUrl} from '../offline/downloads';
-import {getPrefetchedStream, requestPrefetch} from './prefetchCache';
+import {getPrefetchedStream, requestPrefetch, requestPrefetchQueue} from './prefetchCache';
 import {QueueSource} from './queue';
+import {holdPlaybackLocks, releasePlaybackLocks} from './playbackLocks';
 import {thumbUrl} from '../ui/thumb';
 
 // ── Timeline navigation model ─────────────────────────────────────────────────
@@ -39,10 +41,38 @@ let repeatOne = false;
 // In-flight single-flight preload (null when idle). Shared so awaiters wait on
 // the same resolve rather than racing it.
 let preloadPromise: Promise<void> | null = null;
+// Bounded retry for preloading the next song. If the next song's resolve fails,
+// we retry a FEW times (with backoff) so a transient blip doesn't leave the
+// boundary advance empty -- but we must NOT retry forever: a stuck preload
+// hammering the resolver every couple seconds is exactly what trips YouTube's
+// rate limiting ("all songs suddenly fail"). After the cap we give up until the
+// next natural trigger (a skip or a track advance re-arms it fresh).
+let preloadRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let preloadFailStreak = 0;
+const PRELOAD_MAX_RETRIES = 3;
+const PRELOAD_RETRY_BASE_MS = 3000;
+function clearPreloadRetry(): void {
+  if (preloadRetryTimer) {
+    clearTimeout(preloadRetryTimer);
+    preloadRetryTimer = null;
+  }
+  preloadFailStreak = 0;
+}
+function schedulePreloadRetry(): void {
+  if (preloadRetryTimer || windowNextId) return;
+  if (preloadFailStreak >= PRELOAD_MAX_RETRIES) return; // give up -> no hammering
+  const delay = PRELOAD_RETRY_BASE_MS * preloadFailStreak; // 3s, 6s, 9s (backoff)
+  preloadRetryTimer = setTimeout(() => {
+    preloadRetryTimer = null;
+    if (!windowNextId && source && current) void preloadNext();
+  }, delay);
+}
 
 type Stream = {url: string; headers?: Record<string, string>};
 
-// Serialize every player mutation so async loads never interleave.
+// Serialize every player mutation so async loads never interleave. Only NATIVE
+// TrackPlayer calls go through here -- never a network resolve, which can hang
+// (its timeout timer is frozen when backgrounded) and would deadlock the queue.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(fn: () => Promise<T>): Promise<T> {
   const run = opChain.then(fn, fn);
@@ -120,7 +150,30 @@ function cancelSeek(): void {
   }
   seekActive = false;
 }
-function scheduleSeek(): void {
+// `immediate` = commit the seek NOW instead of after the debounce. Used for
+// remote (notification / lock-screen / headset) skips: RN throttles JS timers
+// when the app is backgrounded, so a setTimeout-based commit never fires there
+// -- the pointer moves and audio pauses but the track never actually switches
+// until the app is foregrounded (the "notification next only works in
+// foreground" bug). Native calls + promise microtasks DO run in the
+// background, so committing directly works. Rapid remote presses still
+// coalesce because commitSeek reads the LATEST pos at run time.
+function scheduleSeek(immediate = false): void {
+  if (immediate) {
+    // Commit NOW, and do NOT pause first. The debounce-time pause() only exists
+    // to silence the old track during the wait -- an immediate commit has no
+    // wait. Worse, pausing then playing from a BACKGROUNDED app can't always
+    // re-acquire audio focus (autoHandleInterruptions), which left remote skips
+    // stuck PAUSED after a couple of presses. commitSeek switches + plays on its
+    // own, so skip the pause entirely here.
+    if (seekTimer) {
+      clearTimeout(seekTimer);
+      seekTimer = null;
+    }
+    seekActive = false;
+    commitSeek();
+    return;
+  }
   if (!seekActive) {
     seekActive = true;
     void TrackPlayer.pause().catch(() => {}); // stop old audio while you skip
@@ -162,6 +215,29 @@ function nextAfterActive(): Song | null {
   return extendTimeline();
 }
 
+// Pre-resolve the URLs of the next several upcoming songs (the background-skip
+// buffer). This is what makes notification skipping work backgrounded: a live
+// resolve HANGS when the app is backgrounded (the OS freezes its network), so
+// the ONLY way a skip works there is if the target's URL was already resolved
+// while foreground. So we commit the timeline a few songs ahead (via the
+// source's real next() -- works for vibe AND plain queues) and prefetch those
+// URLs. The 1-deep native preload then always hits the cache, so every skip
+// stays a native queue advance with no network on its path.
+const PREFETCH_AHEAD = 12;
+function prefetchAhead(): void {
+  if (!source) return;
+  // Commit the timeline a few picks ahead (idempotent -- extendTimeline only
+  // grows it; preloadNext reuses the same committed entries).
+  while (timeline.length <= activePos + PREFETCH_AHEAD) {
+    if (!extendTimeline()) break; // source exhausted
+  }
+  const ahead: Song[] = [];
+  for (let i = activePos + 1; i < timeline.length && i <= activePos + PREFETCH_AHEAD; i++) {
+    ahead.push(timeline[i]);
+  }
+  if (ahead.length > 0) requestPrefetchQueue(ahead);
+}
+
 // Load `song` fresh (reset the player) and play it. Resolve FIRST so a failed
 // resolve doesn't tear down the currently-playing track. Returns false on
 // failure so the caller can skip forward.
@@ -175,8 +251,11 @@ async function loadCurrent(song: Song): Promise<boolean> {
   await TrackPlayer.reset();
   await TrackPlayer.add(toTrack(song, stream));
   await TrackPlayer.play();
+  holdPlaybackLocks(); // keep Wi-Fi/CPU awake so background resolves keep flowing
+  markActivity();
   current = song;
   windowNextId = null;
+  clearPreloadRetry(); // fresh song -> any pending retry targets the old next
   emitNowPlaying();
   return true;
 }
@@ -196,13 +275,29 @@ function preloadNext(): Promise<void> {
     try {
       const nx = nextAfterActive();
       if (!nx) return;
+      // Resolve the URL OFF the serialize chain (slow) ...
       const stream = await resolveStream(nx);
-      if (windowNextId) return; // someone else won the race
-      await TrackPlayer.add(toTrack(nx, stream));
-      windowNextId = nx.videoId;
-      emitNowPlaying(); // Up Next can now show it
+      // ... but do the native TrackPlayer.add ON the chain. Native player
+      // mutations must never overlap (a reset/play from a concurrent
+      // loadCurrent racing this add wedges RNTP's native layer -- an await
+      // that never resolves, which permanently deadlocks the whole serialize
+      // queue and freezes every future skip). serialize() guarantees they run
+      // strictly one-at-a-time.
+      await serialize(async () => {
+        if (windowNextId) return; // someone else won the race
+        if (timeline[activePos + 1]?.videoId !== nx.videoId) return; // frontier moved
+        await TrackPlayer.add(toTrack(nx, stream));
+        windowNextId = nx.videoId;
+        clearPreloadRetry(); // success: stop retrying
+        emitNowPlaying(); // Up Next can now show it
+      });
     } catch {
-      // leave unloaded; a genuine end just fires PlaybackQueueEnded
+      // Resolve failed (transient blip, or a rate-limit). Retry a bounded number
+      // of times with backoff so we don't hammer the resolver (which trips
+      // YouTube's rate limiting). After the cap, give up until the next natural
+      // trigger re-arms preloading.
+      preloadFailStreak += 1;
+      schedulePreloadRetry();
     } finally {
       preloadPromise = null;
     }
@@ -231,7 +326,7 @@ async function reconcileActive(): Promise<void> {
     current = timeline[activePos] ?? current;
     windowNextId = null;
     emitNowPlaying();
-    requestPrefetch(source.peekNext?.() ?? null);
+    prefetchAhead();
     void preloadNext();
     return;
   }
@@ -272,32 +367,45 @@ export function playFrom(src: QueueSource, first: Song): Promise<void> {
       fallbackBySong.set(first.videoId, 'error');
       emitNowPlaying();
       await TrackPlayer.stop();
-      return;
+      releasePlaybackLocks();
+      return false;
     }
-    await preloadNext();
-    // Warm the URL of the song after the window for a snappy following advance.
-    requestPrefetch(source.peekNext?.() ?? null);
+    return true;
+  }).then(ok => {
+    // Preload AFTER the serialize block, not inside it: preloadNext serializes
+    // its own native add, and awaiting it from within a serialize job would
+    // queue that add behind this very job -> deadlock.
+    if (ok && source) {
+      void preloadNext();
+      prefetchAhead();
+    }
   });
 }
 
 // Manual next: move the pointer forward (extending the timeline at the frontier)
 // and load the landed song when tapping stops. Instant UI flip; debounced load.
-export function skipToNext(): Promise<void> {
-  if (!source || !current) return Promise.resolve();
+// `immediate` (remote/notification skips) commits now instead of via the
+// background-throttled debounce timer -- see scheduleSeek.
+export function skipToNext(immediate = false): Promise<void> {
+  if (!source || !current) {
+    return Promise.resolve();
+  }
   if (pos === timeline.length - 1) {
-    if (!extendTimeline()) return Promise.resolve(); // at the end of the source
+    if (!extendTimeline()) {
+      return Promise.resolve(); // at the end of the source
+    }
   }
   pos += 1;
   current = timeline[pos];
   emitNowPlaying();
   requestPrefetch(current);
-  scheduleSeek();
+  scheduleSeek(immediate);
   return Promise.resolve();
 }
 
 // Manual previous: step the pointer back through the timeline. At the very start
 // it restarts the current track.
-export function skipToPrevious(): Promise<void> {
+export function skipToPrevious(immediate = false): Promise<void> {
   if (!source || !current) return Promise.resolve();
   if (pos === 0) {
     cancelSeek();
@@ -308,7 +416,7 @@ export function skipToPrevious(): Promise<void> {
   current = timeline[pos];
   emitNowPlaying();
   requestPrefetch(current);
-  scheduleSeek();
+  scheduleSeek(immediate);
   return Promise.resolve();
 }
 
@@ -316,47 +424,85 @@ export function skipToPrevious(): Promise<void> {
 function commitSeek(): void {
   seekTimer = null;
   seekActive = false;
-  const targetPos = pos;
-  void serialize(async () => {
-    if (!source) return;
+  // NOTE: the outer body is NOT serialized. Only the native TrackPlayer
+  // mutations below are wrapped in serialize(). The network RESOLVE for a
+  // load-fresh jump is done OFF the chain -- crucial, because that resolve can
+  // hang (its 15s timeout is a setTimeout, which Android FREEZES when the app
+  // is backgrounded, so it never fires). If the resolve ran on the serialize
+  // chain, one hung resolve would deadlock the queue and every future skip
+  // would jam behind it -- the "notification next stops working in the
+  // background" bug. Off the chain, a hung resolve only strands its own skip.
+  void (async () => {
+    const targetPos = pos;
     const target = timeline[targetPos];
-    if (!target) return;
+    if (!source || !target) return;
+
+    // Already on this song -> just make sure we're playing.
     if (targetPos === activePos) {
-      // Ping-ponged back to where we already are -> just resume.
-      await TrackPlayer.play().catch(() => {});
+      await serialize(() => TrackPlayer.play().catch(() => {}));
       return;
     }
+
+    // Adjacent forward to the already-preloaded next -> instant native skip,
+    // no resolve on the critical path.
     if (targetPos === activePos + 1 && windowNextId === target.videoId) {
-      // Adjacent forward to the already-preloaded next -> native skip (instant).
-      try {
-        await TrackPlayer.skipToNext();
-      } catch {
-        // ignore
-      }
-      await TrackPlayer.play().catch(() => {});
-      activePos = targetPos;
-      current = target;
-      windowNextId = null;
-      emitNowPlaying();
-      requestPrefetch(source.peekNext?.() ?? null);
-      await preloadNext();
-    } else {
-      // Jump (multi-song burst, or any backward move) -> load fresh.
-      const ok = await loadCurrent(target);
-      if (ok) {
+      await serialize(async () => {
+        if (activePos !== targetPos - 1 || windowNextId !== target.videoId) return;
+        try {
+          await TrackPlayer.skipToNext();
+        } catch {
+          // ignore
+        }
+        await TrackPlayer.play().catch(() => {});
+        holdPlaybackLocks();
+        markActivity();
         activePos = targetPos;
-        await preloadNext();
-      } else {
-        // Landed on a song that won't load -> flag the error and stop here
-        // rather than leaving an endless spinner. The user chose this song;
-        // let them retry or skip again, don't silently churn onward.
+        current = target;
+        windowNextId = null;
+        emitNowPlaying();
+        prefetchAhead();
+      });
+      void preloadNext();
+      return;
+    }
+
+    // Load-fresh jump (backward, or the next wasn't preloaded). Resolve the URL
+    // OFF the serialize chain, then do the native reset/add/play ON it.
+    let stream: Stream | null = null;
+    try {
+      stream = await resolveStream(target);
+    } catch {
+      stream = null;
+    }
+    if (pos !== targetPos) return; // a newer skip superseded this one -> drop it
+
+    await serialize(async () => {
+      if (pos !== targetPos) return; // superseded while queued
+      if (!stream) {
+        // Won't load (dead id / connection down) -> flag error + stop, rather
+        // than an endless spinner. The user can retry or skip again.
         activePos = targetPos;
+        current = target;
         fallbackBySong.set(target.videoId, 'error');
         emitNowPlaying();
         await TrackPlayer.stop().catch(() => {});
+        releasePlaybackLocks();
+        return;
       }
-    }
-  });
+      await TrackPlayer.reset();
+      await TrackPlayer.add(toTrack(target, stream));
+      await TrackPlayer.play();
+      holdPlaybackLocks();
+      markActivity();
+      activePos = targetPos;
+      current = target;
+      windowNextId = null;
+      clearPreloadRetry();
+      emitNowPlaying();
+    });
+    void preloadNext();
+    prefetchAhead();
+  })();
 }
 
 // Called by the playback service on PlaybackActiveTrackChanged. Ignored while a
@@ -379,6 +525,7 @@ export function handlePlaybackError(): Promise<void> {
       emitNowPlaying();
     }
     await TrackPlayer.stop().catch(() => {});
+    releasePlaybackLocks();
   });
 }
 
@@ -417,31 +564,98 @@ export async function invalidateWindow(): Promise<void> {
     windowNextId = null;
     timeline = timeline.slice(0, activePos + 1);
     if (pos > activePos) pos = activePos;
-    await preloadNext();
-    requestPrefetch(source.peekNext?.() ?? null);
-    emitNowPlaying();
   });
+  // Preload OUTSIDE the serialize block (it serializes its own native add).
+  if (source) {
+    void preloadNext();
+    prefetchAhead();
+    emitNowPlaying();
+  }
 }
 
 // Called on PlaybackQueueEnded -- a genuine end (nothing preloaded). Try once
 // more to extend + advance, else leave stopped. Repeat-one is native.
 export async function handleQueueEnded(): Promise<void> {
-  await serialize(async () => {
-    if (!source) return;
-    await preloadNext();
-    if (windowNextId) {
+  if (!source) return;
+  // Preload OUTSIDE serialize (it serializes its own native add). Awaiting it
+  // inside a serialize block would nest-deadlock.
+  await preloadNext();
+  if (windowNextId) {
+    await serialize(async () => {
       try {
         await TrackPlayer.skipToNext();
       } catch {
         // ignore
       }
       await reconcileActive();
-    }
-  });
+    });
+  }
 }
 
 export function nowPlaying(): Song | null {
   return current;
+}
+
+// ── Stale-session expiry ──────────────────────────────────────────────────────
+// appKilledPlaybackBehavior:ContinuePlayback (App.tsx) keeps the RNTP queue and
+// media notification alive long after the app is swiped away or left idle, so
+// reopening the app hours/days later would otherwise resurrect the last (usually
+// paused) song in the mini player. We stamp the last time playback was actually
+// active; on the app returning to the foreground, a session idle past
+// STALE_SESSION_MS is dropped -- UNLESS it's still playing (a genuinely long
+// listen stays put).
+const STALE_SESSION_MS = 2 * 60 * 60 * 1000; // 2h idle -> forget the last song
+const LAST_ACTIVE_KEY = 'flowstate.player.lastActiveAt';
+let lastActiveAt = 0;
+
+function markActivity(): void {
+  lastActiveAt = Date.now();
+  void AsyncStorage.setItem(LAST_ACTIVE_KEY, String(lastActiveAt)).catch(() => {});
+}
+
+/**
+ * Called when the app returns to the foreground (App.tsx AppState listener). If
+ * nothing is currently playing and the last activity was long ago, clear the
+ * lingering session so the mini player doesn't show a stale song from a previous
+ * session. A no-op when playback is live or still within the idle window.
+ */
+export async function expireStaleSession(): Promise<void> {
+  try {
+    const {state} = await TrackPlayer.getPlaybackState();
+    if (state === State.Playing || state === State.Buffering || state === State.Loading) {
+      markActivity(); // still going -> keep the session fresh
+      return;
+    }
+  } catch {
+    // couldn't read state -> fall through to the timestamp check
+  }
+  let last = lastActiveAt;
+  if (!last) {
+    const stored = await AsyncStorage.getItem(LAST_ACTIVE_KEY).catch(() => null);
+    last = stored ? Number(stored) || 0 : 0;
+  }
+  // No known activity, or still within the window -> leave the session alone.
+  if (!last || Date.now() - last < STALE_SESSION_MS) return;
+  await clearSession();
+}
+
+async function clearSession(): Promise<void> {
+  cancelSeek();
+  clearPreloadRetry();
+  try {
+    await TrackPlayer.reset(); // stops playback + clears queue + drops notification
+  } catch {
+    // ignore
+  }
+  releasePlaybackLocks();
+  source = null;
+  timeline = [];
+  pos = 0;
+  activePos = 0;
+  windowNextId = null;
+  current = null;
+  void AsyncStorage.removeItem(LAST_ACTIVE_KEY).catch(() => {});
+  emitNowPlaying();
 }
 
 const nowPlayingListeners = new Set<() => void>();
@@ -481,8 +695,14 @@ export function activeVideoId(): string | null {
 // usePlaybackState hook), so we DON'T pay an extra getPlaybackState() native
 // round-trip before acting -- that round-trip was the play/pause lag.
 export async function togglePlayPause(isPlaying: boolean): Promise<void> {
-  if (isPlaying) await TrackPlayer.pause();
-  else await TrackPlayer.play();
+  if (isPlaying) {
+    await TrackPlayer.pause();
+    releasePlaybackLocks(); // paused -> no need to keep Wi-Fi/CPU awake
+  } else {
+    await TrackPlayer.play();
+    holdPlaybackLocks();
+    markActivity();
+  }
 }
 
 // Test-only reset of module state.
@@ -495,6 +715,7 @@ export function _resetControllerForTests(): void {
   windowNextId = null;
   repeatOne = false;
   preloadPromise = null;
+  clearPreloadRetry();
   pendingFallback = null;
   fallbackBySong.clear();
   cancelSeek();

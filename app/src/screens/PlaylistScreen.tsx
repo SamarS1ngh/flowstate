@@ -39,6 +39,7 @@ import SkeletonList from '../ui/Skeleton';
 import type {Song} from '../types';
 import Chip from '../ui/Chip';
 import CircleButton from '../ui/CircleButton';
+import ShuffleGlyph from '../ui/ShuffleGlyph';
 import Collage from '../ui/Collage';
 import HoloFrame from '../ui/HoloFrame';
 import IconButton from '../ui/IconButton';
@@ -260,6 +261,17 @@ export default function PlaylistScreen({route, navigation}: Props) {
     }
   };
 
+  // Random play: pick any random song from the (visible) playlist and play it,
+  // exactly as if the user tapped that row -- so it respects the current mode
+  // (radio mode seeds radio from it; vibe mode plays it into a vibe/simple
+  // queue). The queue then continues from that song onward.
+  const playRandom = () => {
+    if (visibleSongs.length === 0) return;
+    const i = Math.floor(Math.random() * visibleSongs.length);
+    if (mode === 'radio') startRadioFrom(visibleSongs[i]);
+    else playIndex(i);
+  };
+
   // Start an endless YouTube song-radio seeded from `song`, on its own screen.
   const startRadioFrom = (song: Song) => {
     navigation.navigate('Radio');
@@ -337,6 +349,12 @@ export default function PlaylistScreen({route, navigation}: Props) {
                     else playIndex(0);
                   }}
                 />
+                {/* Random play: start from any random song in the playlist.
+                    Same size/weight as Play (white circle) -- the sibling
+                    action, distinguished by the crisp white shuffle glyph. */}
+                <CircleButton size={64} onPress={playRandom}>
+                  <ShuffleGlyph size={28} color={colors.black} />
+                </CircleButton>
               </View>
               {/* Mode selector: mutually exclusive, exactly one active (like the
                   vibe on/off toggle below). Radio mode makes a song tap start
@@ -548,7 +566,13 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginTop: spacing.xs,
   },
-  playRow: {alignItems: 'center', marginTop: spacing.xl},
+  playRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.lg,
+    marginTop: spacing.xl,
+  },
   disabled: {opacity: 0.4},
   modeSelector: {
     flexDirection: 'row',

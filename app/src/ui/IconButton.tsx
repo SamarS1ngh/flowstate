@@ -9,6 +9,7 @@ import {colors} from './theme';
 // when `filled` (used for the player's transport/menu buttons over art).
 export default function IconButton({
   name,
+  children,
   onPress,
   size = 22,
   color = colors.textPrimary,
@@ -17,7 +18,10 @@ export default function IconButton({
   hitSlop = 10,
   style,
 }: {
-  name: IconName;
+  name?: IconName;
+  // Custom icon node (e.g. an SVG glyph) rendered instead of the built-in
+  // `name`. One of `name`/`children` should be provided.
+  children?: React.ReactNode;
   onPress?: () => void;
   size?: number;
   color?: string;
@@ -38,7 +42,7 @@ export default function IconButton({
         disabled && styles.disabled,
         style,
       ]}>
-      <Icon name={name} size={size} color={color} />
+      {children ?? (name ? <Icon name={name} size={size} color={color} /> : null)}
     </Pressable>
   );
 }

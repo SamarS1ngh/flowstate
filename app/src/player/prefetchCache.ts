@@ -18,7 +18,13 @@ import {resolveStreamUrl, StreamResolveError} from '../stream/resolver';
 
 type Stream = {url: string; headers?: Record<string, string>};
 
-const MAX_CACHED = 4;
+// Deep enough to hold a small buffer of upcoming songs. This is what makes
+// skipping work when the app is BACKGROUNDED: a fresh YouTube resolve hangs in
+// the background (the OS freezes the app's network there), so we resolve the
+// next several songs' URLs WHILE FOREGROUND and cache them. A backgrounded skip
+// then finds its target already resolved and never has to hit the network.
+const MAX_CACHED = 16;
+const MAX_PREFETCH_DEPTH = 12;
 
 // videoId -> resolved stream (url + headers). Session-scoped; googlevideo URLs
 // stay valid for hours, and a stale one just fails playback -> skipToNext's
@@ -26,8 +32,8 @@ const MAX_CACHED = 4;
 const done = new Map<string, Stream>();
 const lru: string[] = [];
 let activeId: string | null = null;
-let desiredId: string | null = null;
-let wanted: Song | null = null;
+// The ordered list of songs we WANT resolved ahead (highest priority first).
+let queue: Song[] = [];
 
 function touchLru(videoId: string): void {
   const i = lru.indexOf(videoId);
@@ -57,34 +63,40 @@ async function resolveOnce(song: Song): Promise<Stream | null> {
 }
 
 async function pump(): Promise<void> {
-  if (activeId) return; // one at a time
-  const id = desiredId;
-  if (!id || done.has(id)) return; // nothing to do / already cached
-  const song = wanted;
-  if (!song || song.videoId !== id) return;
-  activeId = id;
+  if (activeId) return; // one resolve at a time
+  const song = queue.find(s => !done.has(s.videoId)); // first not-yet-cached
+  if (!song) return;
+  activeId = song.videoId;
   try {
     const stream = await resolveOnce(song);
     if (stream) {
-      done.set(id, stream);
-      touchLru(id);
+      done.set(song.videoId, stream);
+      touchLru(song.videoId);
       evict();
     }
   } finally {
     activeId = null;
-    if (desiredId && desiredId !== id && !done.has(desiredId)) void pump();
+    if (queue.some(s => !done.has(s.videoId))) void pump(); // keep filling
   }
 }
 
 /**
  * Request that `song` (the likely next) have its stream URL resolved ahead of
- * time. Coalesces rapid calls: latest target only, one resolve at a time, never
- * a duplicate. Fire-and-forget.
+ * time. Fire-and-forget. Back-compat single-song entry point.
  */
 export function requestPrefetch(song: Song | null): void {
   if (!song) return;
-  desiredId = song.videoId;
-  wanted = song;
+  requestPrefetchQueue([song]);
+}
+
+/**
+ * Resolve+cache the next several upcoming songs' URLs (highest priority first),
+ * one at a time. Songs already cached are skipped. This is the background-skip
+ * buffer -- call it (while foreground) with the upcoming songs so a later
+ * backgrounded skip finds them pre-resolved.
+ */
+export function requestPrefetchQueue(songs: Song[]): void {
+  queue = songs.filter(Boolean).slice(0, MAX_PREFETCH_DEPTH);
   void pump();
 }
 
@@ -100,6 +112,5 @@ export function _resetPrefetchForTests(): void {
   done.clear();
   lru.length = 0;
   activeId = null;
-  desiredId = null;
-  wanted = null;
+  queue = [];
 }

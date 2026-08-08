@@ -69,12 +69,13 @@ jest.mock('../src/player/prefetchCache', () => ({
   __esModule: true,
   getPrefetchedStream: jest.fn().mockReturnValue(null),
   requestPrefetch: jest.fn(),
+  requestPrefetchQueue: jest.fn(),
 }));
 
 import TrackPlayer from 'react-native-track-player';
 import {resolveStreamUrl} from '../src/stream/resolver';
 import {offlineUrl} from '../src/offline/downloads';
-import {getPrefetchedStream, requestPrefetch} from '../src/player/prefetchCache';
+import {getPrefetchedStream, requestPrefetchQueue} from '../src/player/prefetchCache';
 import {
   playFrom,
   skipToNext,
@@ -94,7 +95,7 @@ const tp = TrackPlayer as unknown as Record<string, jest.Mock>;
 const resolveMock = resolveStreamUrl as jest.Mock;
 const offlineMock = offlineUrl as jest.Mock;
 const prefetchedMock = getPrefetchedStream as jest.Mock;
-const requestPrefetchMock = requestPrefetch as jest.Mock;
+const requestPrefetchQueueMock = requestPrefetchQueue as jest.Mock;
 
 // Advance past the skip debounce AND flush the promise microtasks it schedules.
 const settle = async () => {
@@ -179,7 +180,9 @@ describe('windowed native-advance', () => {
     expect(addedIds()).toEqual(['a', 'b']);
     expect(nowPlaying()?.videoId).toBe('a');
     expect(peekNextSong()?.videoId).toBe('b');
-    expect(requestPrefetchMock.mock.calls.at(-1)?.[0]?.videoId).toBe('c');
+    // The upcoming songs' URLs are prefetched (the background-skip buffer).
+    const q = requestPrefetchQueueMock.mock.calls.at(-1)?.[0] as Song[] | undefined;
+    expect(q?.map(s => s.videoId)).toContain('b');
   });
 
   test('a song ending advances to the pre-loaded next NATIVELY (no reset)', async () => {
@@ -342,6 +345,39 @@ describe('failure handling', () => {
     expect(nowPlaying()?.videoId).toBe('seed'); // stayed on the chosen song
     expect(tp.stop).toHaveBeenCalled();
     expect(consumeFallbackStatus()).toBe('error');
+  });
+
+  test('a hung load-fresh resolve does NOT jam the queue -- a later skip still advances', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c', 'd']), song('a'));
+    await settle();
+    // 'c' will never resolve (simulates a resolve that hangs backgrounded, where
+    // the 15s timeout timer is frozen). 'd' resolves fine.
+    resolveMock.mockImplementation((id: string) =>
+      id === 'c'
+        ? new Promise(() => {}) // never settles
+        : Promise.resolve({url: 'https://example.com/s.mp3', headers: {}}),
+    );
+    await skipToNext(true); // -> 'b' (native preloaded)
+    await settle();
+    await skipToNext(true); // -> 'c' (load-fresh, resolve HANGS off-chain)
+    await settle();
+    await skipToNext(true); // -> 'd' (load-fresh, resolves)
+    await settle();
+    // The hung 'c' must not have blocked 'd': the queue advanced to 'd'.
+    expect(addedContains('d')).toBe(true);
+    expect(nowPlaying()?.videoId).toBe('d');
+  });
+
+  test('a remote (immediate) skip advances WITHOUT the debounce timer', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
+    await settle();
+    // immediate=true (notification/lock skip): must commit on microtasks alone,
+    // since JS timers are frozen when the app is backgrounded.
+    await skipToNext(true);
+    for (let i = 0; i < 10; i++) await Promise.resolve(); // flush microtasks only
+    expect(nowPlaying()?.videoId).toBe('b');
+    // and it must NOT leave the player paused (the stuck-paused bug).
+    expect(tp.pause).not.toHaveBeenCalled();
   });
 
   test('invalidateWindow drops the stale preloaded next and re-picks a fresh one', async () => {

@@ -9,6 +9,7 @@ import {colors} from './theme';
 // taps -- used while a track is resolving/buffering but not yet audible.
 export default function CircleButton({
   icon,
+  children,
   onPress,
   size = 64,
   iconSize,
@@ -17,7 +18,10 @@ export default function CircleButton({
   loading = false,
   style,
 }: {
-  icon: IconName;
+  icon?: IconName;
+  // Custom icon node (e.g. an SVG glyph) rendered instead of the built-in
+  // `icon`. One of `icon`/`children` should be provided.
+  children?: React.ReactNode;
   onPress?: () => void;
   size?: number;
   iconSize?: number;
@@ -38,9 +42,11 @@ export default function CircleButton({
       ]}>
       {loading ? (
         <ActivityIndicator size="small" color={iconColor} />
-      ) : (
+      ) : children ? (
+        children
+      ) : icon ? (
         <Icon name={icon} size={iconSize ?? size * 0.4} color={iconColor} />
-      )}
+      ) : null}
     </Pressable>
   );
 }

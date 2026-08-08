@@ -1,4 +1,81 @@
+import {NativeModules} from 'react-native';
 import {Innertube} from 'youtubei.js';
+
+// Native OkHttp bridge (android/.../NativeHttpModule.kt). Present on-device;
+// undefined under Jest -> anonymousFetch falls back to RN fetch there.
+type NativeHttpResponse = {
+  status: number;
+  statusText: string;
+  url: string;
+  body: string;
+  headers: Record<string, string>;
+};
+const NativeHttp = (NativeModules as {NativeHttp?: unknown}).NativeHttp as
+  | {
+      request: (
+        url: string,
+        method: string,
+        headers: Record<string, string> | null,
+        body: string | null,
+        readBody: boolean,
+      ) => Promise<NativeHttpResponse>;
+    }
+  | undefined;
+
+function headersToObject(h: HeadersInit | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!h) return out;
+  const anyH = h as unknown as {forEach?: (cb: (v: string, k: string) => void) => void};
+  if (typeof anyH.forEach === 'function') {
+    anyH.forEach((v, k) => {
+      out[k] = v;
+    });
+    return out;
+  }
+  if (Array.isArray(h)) {
+    for (const [k, v] of h) out[k] = String(v);
+    return out;
+  }
+  for (const k of Object.keys(h as Record<string, string>)) {
+    out[k] = String((h as Record<string, string>)[k]);
+  }
+  return out;
+}
+
+// A `fetch`-compatible function backed by NATIVE OkHttp. youtubei.js always
+// calls its fetch as `(Request, {body, headers, redirect, credentials})`, but
+// we also handle string/URL inputs so it works for validateUrl's direct GET.
+async function nativeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  let url: string;
+  let method: string;
+  let headers: Record<string, string>;
+  if (typeof input === 'string') {
+    url = input;
+    method = init?.method ?? 'GET';
+    headers = headersToObject(init?.headers);
+  } else if (input instanceof URL) {
+    url = input.href;
+    method = init?.method ?? 'GET';
+    headers = headersToObject(init?.headers);
+  } else {
+    // Request object
+    url = input.url;
+    method = init?.method ?? input.method ?? 'GET';
+    headers = headersToObject(init?.headers ?? input.headers);
+  }
+  let body: string | null = null;
+  const b = init?.body;
+  if (b != null) body = typeof b === 'string' ? b : String(b);
+  // __noBody: skip downloading the response body (validateUrl only needs status).
+  const readBody = !(init as {__noBody?: boolean} | undefined)?.__noBody;
+  const res = await NativeHttp!.request(url, method, headers, body, readBody);
+  return new Response(res.body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+    url: res.url,
+  } as ResponseInit) as Response;
+}
 
 export class StreamResolveError extends Error {
   cause?: unknown;
@@ -84,6 +161,11 @@ export function pickAudioFormat<T extends AudioFormatLike>(
 // behavior above without needing a real network stack or RN's
 // CookieManager -- see __tests__/resolver.test.ts.
 export function anonymousFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  // Native path (on-device): OkHttp runs backgrounded like ExoPlayer, so a
+  // notification skip that needs a fresh resolve no longer hangs on RN's frozen
+  // fetch. No cookie jar there -> already anonymous. Falls back to RN fetch with
+  // credentials:'omit' when the native module is absent (Jest / non-Android).
+  if (NativeHttp?.request) return nativeFetch(input, init);
   return fetch(input, {...init, credentials: 'omit'});
 }
 
@@ -186,7 +268,9 @@ async function validateUrl(url: string, headers: Record<string, string>): Promis
       method: 'GET',
       headers: {...headers, Range: 'bytes=0-'},
       signal: controller.signal,
-    });
+      // Native path: don't pull the media body down -- only the status matters.
+      __noBody: true,
+    } as RequestInit);
     const ok = res.ok || res.status === 206;
     controller.abort(); // status is known; stop pulling the body down
     return ok;

@@ -34,8 +34,60 @@ class AnalysisServiceModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     private var batteryReceiver: BroadcastReceiver? = null
+    private var playbackWifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private var playbackWakeLock: PowerManager.WakeLock? = null
 
     override fun getName(): String = "AnalysisService"
+
+    // --- playback network locks ---------------------------------------
+    // When the screen turns off / the app backgrounds, Android puts Wi-Fi into
+    // power-save and throttles the app's CPU. That STALLS the network resolve
+    // that every skip needs -- the request just hangs (measured 45s+), so
+    // notification skips die after the pre-buffered songs run out. Holding a
+    // Wi-Fi lock (radio stays active) + a partial wake lock (CPU stays awake for
+    // the JS resolve) while music is playing keeps those background resolves
+    // flowing, so skipping works indefinitely -- the same fix that made
+    // background ANALYSIS reliable.
+    @ReactMethod
+    fun holdPlaybackLocks() {
+        try {
+            if (playbackWifiLock?.isHeld != true) {
+                val wm = reactContext.applicationContext
+                    .getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+                val mode =
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q)
+                        android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                    else @Suppress("DEPRECATION") android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                playbackWifiLock = wm?.createWifiLock(mode, "flowstate:playback-wifi")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }
+            if (playbackWakeLock?.isHeld != true) {
+                val pm = reactContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                playbackWakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "flowstate:playback")
+                    ?.apply {
+                        setReferenceCounted(false)
+                        acquire(6 * 60 * 60 * 1000L) // safety timeout; re-acquired on next play
+                    }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    @ReactMethod
+    fun releasePlaybackLocks() {
+        try {
+            playbackWifiLock?.let { if (it.isHeld) it.release() }
+        } catch (_: Exception) {
+        }
+        playbackWifiLock = null
+        try {
+            playbackWakeLock?.let { if (it.isHeld) it.release() }
+        } catch (_: Exception) {
+        }
+        playbackWakeLock = null
+    }
 
     @ReactMethod
     fun start(title: String, text: String) {
@@ -161,6 +213,7 @@ class AnalysisServiceModule(private val reactContext: ReactApplicationContext) :
     }
 
     override fun invalidate() {
+        releasePlaybackLocks()
         batteryReceiver?.let {
             try {
                 reactContext.unregisterReceiver(it)

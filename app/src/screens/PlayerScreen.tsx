@@ -71,6 +71,7 @@ import CircleButton from '../ui/CircleButton';
 import HoloFrame from '../ui/HoloFrame';
 import HudChrome from '../ui/HudChrome';
 import IconButton from '../ui/IconButton';
+import ShuffleGlyph from '../ui/ShuffleGlyph';
 import ListRow from '../ui/ListRow';
 import Thumbnail from '../ui/Thumbnail';
 import {colors, gradients, radii, spacing, thumbSize, type} from '../ui/theme';
@@ -739,12 +740,13 @@ export default function PlayerScreen({navigation}: Props) {
                 position (matches the reference app's shuffle-prev-play-next-repeat
                 layout) -- dimmed/inert when there's no vibe queue to toggle. */}
             <IconButton
-              name="shuffle"
-              size={isVibe && !isLock ? 25 : 22}
-              color={isVibe ? (isLock ? colors.textSecondary : colors.neon) : colors.textTertiary}
               disabled={!isVibe}
-              onPress={onToggleLockDrift}
-            />
+              onPress={onToggleLockDrift}>
+              <ShuffleGlyph
+                size={isVibe && !isLock ? 25 : 22}
+                color={isVibe ? (isLock ? colors.textSecondary : colors.neon) : colors.textTertiary}
+              />
+            </IconButton>
             <IconButton name="previous" size={24} onPress={handlePrev} />
             <View style={styles.playGlow}>
               <Animated.View style={[styles.playHalo, haloStyle]} pointerEvents="none" />
