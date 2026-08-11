@@ -235,17 +235,23 @@ export default function PlayerScreen({navigation}: Props) {
   const isVibe = src instanceof VibeQueue;
   const isRadio = src instanceof RadioQueue;
 
-  // Reset the mood-chip selection (and the underlying queue's filter) when
-  // the active source changes identity -- e.g. the user started a new vibe
-  // session from PlaylistScreen while this screen stayed mounted (React
-  // Navigation reuses the 'Player' route instance when navigating to it
-  // again from elsewhere in the stack). `src` is recomputed fresh from
-  // currentSource() every render, so depending on it here is equivalent to
-  // comparing against the previous source by reference.
+  // Sync the mood-chip selection to whatever the active source ALREADY has
+  // when the source changes identity. This covers two cases with one rule --
+  // "reflect the source, never fight it":
+  //   * A brand-new vibe session (started from PlaylistScreen while this screen
+  //     stayed mounted) has no filter -> chips clear, as before.
+  //   * A RESTORED session (player/session.ts rebuilds a VibeQueue with the
+  //     persisted mood filter already applied) keeps that mood -- so reopening
+  //     the app shows the same mood highlighted and the model keeps filtering
+  //     by it. The old code force-cleared the filter here, which silently wiped
+  //     the restored mood.
+  // We only READ the source's filter; we never mutate it, so the restored mood
+  // survives. `src` is recomputed from currentSource() every render, so this
+  // effect fires exactly when the source instance changes by reference.
   useEffect(() => {
-    setSelectedMood(null);
     previousIdRef.current = null;
-    if (src instanceof VibeQueue) src.setMoodFilter(null);
+    const mood = src instanceof VibeQueue ? src.getMoodFilter()?.key ?? null : null;
+    setSelectedMood(mood);
   }, [src]);
 
   const isPlaying = playbackState.state === State.Playing;

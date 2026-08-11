@@ -61,6 +61,10 @@ export class VibeQueue implements QueueSource {
     return mode === 'lock' ? 'vibe:lock' : 'vibe:drift';
   }
 
+  getMoodFilter(): {key: string; min: number} | null {
+    return this.moodFilter;
+  }
+
   setMoodFilter(f: {key: string; min: number} | null): void {
     const prev = this.moodFilter;
     const changed = (prev?.key ?? null) !== (f?.key ?? null) || (prev?.min ?? null) !== (f?.min ?? null);
