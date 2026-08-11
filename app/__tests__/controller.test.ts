@@ -6,7 +6,7 @@
 //    (the player is paused during the burst, the load is debounced);
 //  - previous reloads the played song from history;
 //  - repeat-one maps to native RepeatMode.Track; the first-load failure cap holds.
-import {QueueSource} from '../src/player/queue';
+import {QueueSource, SourceDescriptor} from '../src/player/queue';
 import {Song} from '../src/types';
 
 // Stateful RNTP mock modelling the native queue + active index.
@@ -132,6 +132,9 @@ class ListSource implements QueueSource {
   peekNext(): Song | null {
     return this.list[this.i + 1] ? song(this.list[this.i + 1]) : null;
   }
+  describe(): SourceDescriptor {
+    return {kind: 'simple', songs: this.list.map(song), index: this.i};
+  }
 }
 
 class EndlessSource implements QueueSource {
@@ -142,6 +145,9 @@ class EndlessSource implements QueueSource {
     return song(`s${this.n}`);
   }
   reset(_s: Song): void {}
+  describe(): SourceDescriptor {
+    return {kind: 'radio'};
+  }
 }
 
 // A source whose next pick can flip at runtime -- stands in for a VibeQueue
@@ -155,6 +161,9 @@ class SwitchSource implements QueueSource {
   }
   peekNext(): Song | null {
     return song(this.pick);
+  }
+  describe(): SourceDescriptor {
+    return {kind: 'radio'};
   }
 }
 

@@ -1,9 +1,21 @@
 import {Song} from '../types';
 
+// Serializable snapshot of a queue source, enough to rebuild an equivalent one
+// after the app is killed (see player/session.ts). It deliberately does NOT try
+// to capture a stochastic source's exact history -- a vibe session re-seeds off
+// the restored song and re-runs the model, and radio regenerates from the API.
+export type SourceDescriptor =
+  | {kind: 'radio'}
+  | {kind: 'vibe'; mode: 'drift' | 'lock'; moodFilter: {key: string; min: number} | null}
+  | {kind: 'simple'; songs: Song[]; index: number};
+
 export interface QueueSource {
   label: string;
   next(lastPlayed: Song | null): Song | null;
   reset(seed: Song): void;
+  // A serializable descriptor of this source, used to persist and later rebuild
+  // the session (player/session.ts). Every source must implement it.
+  describe(): SourceDescriptor;
   // Optional, non-mutating "what's coming up" preview (Player screen's
   // Up Next list). Deliberately optional: a source whose next() is
   // non-deterministic (VibeQueue picks weighted-random each call, and
@@ -37,6 +49,10 @@ export class SimpleQueue implements QueueSource {
   reset(seed: Song): void {
     const i = this.songs.findIndex(s => s.videoId === seed.videoId);
     this.idx = i >= 0 ? i : 0;
+  }
+
+  describe(): SourceDescriptor {
+    return {kind: 'simple', songs: this.songs, index: this.idx};
   }
 
   // Playlist order is fully deterministic and known up front, so this can

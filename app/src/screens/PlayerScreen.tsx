@@ -52,9 +52,9 @@ import {
   skipToNext,
   skipToPrevious,
   subscribeNowPlaying,
-  togglePlayPause,
   FallbackKind,
 } from '../player/controller';
+import {playPressed} from '../player/session';
 import {
   openVibesDb,
   VibesDb,
@@ -258,7 +258,10 @@ export default function PlayerScreen({navigation}: Props) {
   const shownPlaying = wantPlaying ?? isPlaying;
   const onTogglePlay = useCallback(() => {
     setWantPlaying(!shownPlaying);
-    void togglePlayPause(shownPlaying); // pauses if currently playing, else plays
+    // playPressed (not togglePlayPause) so pressing play on a restored-but-not-
+    // yet-resumed session hydrates the queue at the saved position; otherwise
+    // it's an ordinary toggle.
+    void playPressed(shownPlaying);
   }, [shownPlaying]);
   // "Loading" = we have a target song (optimistic open / skip) but the audio
   // isn't actually playing yet -- it's still resolving or buffering. Show a

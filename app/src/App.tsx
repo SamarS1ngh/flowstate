@@ -22,7 +22,12 @@ import RadioScreen from './screens/RadioScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import LoginScreen from './auth/LoginScreen';
 import {openVibesDb} from './db/vibesDb';
-import {currentSource, expireStaleSession} from './player/controller';
+import {currentSource} from './player/controller';
+import {
+  persistNow,
+  restoreSession,
+  startSessionPersistence,
+} from './player/session';
 import {RadioQueue} from './engine/radioQueue';
 import {prewarmResolver} from './stream/resolver';
 import {FeedbackStore} from './engine/feedbackStore';
@@ -167,10 +172,11 @@ export default function App() {
         // is harmless.
         const db = await openVibesDb();
         if (db) new FeedbackStore(db.handle).ensureTables();
-        // Cold start: if ContinuePlayback left a stale (paused, hours-old)
-        // session alive, drop it now -- before the mini player renders -- so
-        // relaunching after a long time doesn't resurrect the last song.
-        void expireStaleSession();
+        // Cold start: restore the last-played track into the mini player
+        // (paused) BEFORE it first renders, so relaunching -- even hours or
+        // days later -- shows where the user left off. The first play press
+        // resumes it at the saved position (see player/session.ts).
+        await restoreSession();
       } catch (e) {
         // Anything else (corrupt vibes.db, updateOptions failure, an
         // unexpected setupPlayer rejection, ...) is non-fatal to boot: the
@@ -182,13 +188,18 @@ export default function App() {
       }
     })();
 
-    // On every return to the foreground, re-check staleness: a session left
-    // paused and idle past the threshold gets dropped so the mini player
-    // doesn't keep showing a song from a much earlier session.
+    // Persist the session continuously (position as it advances + on every
+    // track change) so a kill at any moment loses at most a few seconds.
+    const stopPersistence = startSessionPersistence();
+    // And flush immediately when the app is backgrounded -- the most likely
+    // moment before the OS kills it.
     const sub = AppState.addEventListener('change', s => {
-      if (s === 'active') void expireStaleSession();
+      if (s === 'background') void persistNow();
     });
-    return () => sub.remove();
+    return () => {
+      sub.remove();
+      stopPersistence();
+    };
   }, []);
 
   if (!ready) {

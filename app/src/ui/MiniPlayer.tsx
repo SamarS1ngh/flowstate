@@ -4,7 +4,7 @@ import {State, usePlaybackState, useProgress} from 'react-native-track-player';
 import Thumbnail from './Thumbnail';
 import IconButton from './IconButton';
 import {colors, miniPlayerHeight, radii, spacing, thumbSize} from './theme';
-import {togglePlayPause} from '../player/controller';
+import {playPressed} from '../player/session';
 import {useNowPlayingSong} from './useNowPlaying';
 
 // Persistent mini-player bar (Task 3): mounted once at App level (see
@@ -47,7 +47,7 @@ export default function MiniPlayer({onPress}: {onPress: () => void}) {
       </View>
       <IconButton
         name={isPlaying ? 'pause' : 'play'}
-        onPress={() => togglePlayPause(isPlaying)}
+        onPress={() => playPressed(isPlaying)}
         size={18}
         color={colors.neon}
         hitSlop={8}

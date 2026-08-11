@@ -1,5 +1,5 @@
 import {Song} from '../types';
-import {QueueSource} from '../player/queue';
+import {QueueSource, SourceDescriptor} from '../player/queue';
 import {VibeSong, buildPool, cosine} from './similarity';
 import {FeedbackData, recencyFactor, feedbackBias, composeWeight} from './weights';
 import {samplePick} from './sampler';
@@ -168,6 +168,13 @@ export class VibeQueue implements QueueSource {
     this.seed = found;
     this.history = [found];
     this.pending = null; // new seed -> discard any committed next pick
+  }
+
+  describe(): SourceDescriptor {
+    // Only mode + mood filter are persisted; the stochastic history/session-bans
+    // are intentionally dropped. On restore the queue re-seeds off the restored
+    // song and re-runs the model from there.
+    return {kind: 'vibe', mode: this.mode, moodFilter: this.moodFilter};
   }
 
   private resolveCenter(lastPlayed: Song | null): VibeSong {

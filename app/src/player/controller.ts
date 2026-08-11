@@ -1,5 +1,4 @@
-import TrackPlayer, {RepeatMode, State} from 'react-native-track-player';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import TrackPlayer, {RepeatMode} from 'react-native-track-player';
 import {Song} from '../types';
 import {resolveStreamUrl, StreamResolveError} from '../stream/resolver';
 import {offlineUrl} from '../offline/downloads';
@@ -252,7 +251,6 @@ async function loadCurrent(song: Song): Promise<boolean> {
   await TrackPlayer.add(toTrack(song, stream));
   await TrackPlayer.play();
   holdPlaybackLocks(); // keep Wi-Fi/CPU awake so background resolves keep flowing
-  markActivity();
   current = song;
   windowNextId = null;
   clearPreloadRetry(); // fresh song -> any pending retry targets the old next
@@ -455,7 +453,6 @@ function commitSeek(): void {
         }
         await TrackPlayer.play().catch(() => {});
         holdPlaybackLocks();
-        markActivity();
         activePos = targetPos;
         current = target;
         windowNextId = null;
@@ -493,7 +490,6 @@ function commitSeek(): void {
       await TrackPlayer.add(toTrack(target, stream));
       await TrackPlayer.play();
       holdPlaybackLocks();
-      markActivity();
       activePos = targetPos;
       current = target;
       windowNextId = null;
@@ -596,66 +592,49 @@ export function nowPlaying(): Song | null {
   return current;
 }
 
-// ── Stale-session expiry ──────────────────────────────────────────────────────
-// appKilledPlaybackBehavior:ContinuePlayback (App.tsx) keeps the RNTP queue and
-// media notification alive long after the app is swiped away or left idle, so
-// reopening the app hours/days later would otherwise resurrect the last (usually
-// paused) song in the mini player. We stamp the last time playback was actually
-// active; on the app returning to the foreground, a session idle past
-// STALE_SESSION_MS is dropped -- UNLESS it's still playing (a genuinely long
-// listen stays put).
-const STALE_SESSION_MS = 2 * 60 * 60 * 1000; // 2h idle -> forget the last song
-const LAST_ACTIVE_KEY = 'flowstate.player.lastActiveAt';
-let lastActiveAt = 0;
-
-function markActivity(): void {
-  lastActiveAt = Date.now();
-  void AsyncStorage.setItem(LAST_ACTIVE_KEY, String(lastActiveAt)).catch(() => {});
-}
+// ── Session restore ──────────────────────────────────────────────────────────
+// The last-played track survives the app being killed so the mini player can
+// show it on next launch (see player/session.ts, which owns the persisted
+// snapshot). Restore is two-step so a relaunch never auto-blares audio:
+//   1. restoreForDisplay() sets `current` WITHOUT touching the native player --
+//      the mini player renders the song, paused, with no queue/source yet.
+//   2. the first play press hydrates the real queue at the saved position
+//      (session.playPressed -> loadAtPosition), which builds a fresh source and
+//      resumes playback.
 
 /**
- * Called when the app returns to the foreground (App.tsx AppState listener). If
- * nothing is currently playing and the last activity was long ago, clear the
- * lingering session so the mini player doesn't show a stale song from a previous
- * session. A no-op when playback is live or still within the idle window.
+ * Show a restored song in the mini player without starting playback. No native
+ * TrackPlayer calls -- `source` stays null, so a play press routes through
+ * session.playPressed()'s resume path rather than togglePlayPause.
  */
-export async function expireStaleSession(): Promise<void> {
-  try {
-    const {state} = await TrackPlayer.getPlaybackState();
-    if (state === State.Playing || state === State.Buffering || state === State.Loading) {
-      markActivity(); // still going -> keep the session fresh
-      return;
-    }
-  } catch {
-    // couldn't read state -> fall through to the timestamp check
-  }
-  let last = lastActiveAt;
-  if (!last) {
-    const stored = await AsyncStorage.getItem(LAST_ACTIVE_KEY).catch(() => null);
-    last = stored ? Number(stored) || 0 : 0;
-  }
-  // No known activity, or still within the window -> leave the session alone.
-  if (!last || Date.now() - last < STALE_SESSION_MS) return;
-  await clearSession();
-}
-
-async function clearSession(): Promise<void> {
-  cancelSeek();
-  clearPreloadRetry();
-  try {
-    await TrackPlayer.reset(); // stops playback + clears queue + drops notification
-  } catch {
-    // ignore
-  }
-  releasePlaybackLocks();
+export function restoreForDisplay(song: Song): void {
   source = null;
   timeline = [];
   pos = 0;
   activePos = 0;
   windowNextId = null;
-  current = null;
-  void AsyncStorage.removeItem(LAST_ACTIVE_KEY).catch(() => {});
+  current = song;
   emitNowPlaying();
+}
+
+/**
+ * Load `src`/`first` and seek to `positionS` before it starts — used to resume a
+ * restored session where the user left off. Reuses playFrom (which resets the
+ * player, loads, and preloads the next), then seeks the freshly-loaded track.
+ */
+export async function loadAtPosition(
+  src: QueueSource,
+  first: Song,
+  positionS: number,
+): Promise<void> {
+  await playFrom(src, first);
+  if (positionS > 0) {
+    try {
+      await TrackPlayer.seekTo(positionS);
+    } catch {
+      // seek is best-effort; playback already started from 0 if it fails
+    }
+  }
 }
 
 const nowPlayingListeners = new Set<() => void>();
@@ -701,7 +680,6 @@ export async function togglePlayPause(isPlaying: boolean): Promise<void> {
   } else {
     await TrackPlayer.play();
     holdPlaybackLocks();
-    markActivity();
   }
 }
 

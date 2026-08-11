@@ -12,7 +12,7 @@
 // the stream drifts organically and never runs dry. Songs already served are
 // deduped so it doesn't loop on the seed.
 import type {Song} from '../types';
-import type {QueueSource} from '../player/queue';
+import type {QueueSource, SourceDescriptor} from '../player/queue';
 import {getAuthedInnertube} from '../auth/oauth';
 
 // Refill when the buffer drops to or below this many upcoming songs.
@@ -147,6 +147,12 @@ export class RadioQueue implements QueueSource {
 
   peekUpcoming(count: number): Song[] {
     return this.buffer.slice(0, count);
+  }
+
+  describe(): SourceDescriptor {
+    // Radio is stateless to persist: on restore a fresh RadioQueue re-seeds off
+    // the restored song and the API hands back a new mix (see reset/refill).
+    return {kind: 'radio'};
   }
 
   // Single-flight refill: fetch a fresh mix off the last-served song, append

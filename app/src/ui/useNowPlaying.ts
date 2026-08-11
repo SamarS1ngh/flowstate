@@ -1,6 +1,6 @@
 import {useCallback, useEffect, useState} from 'react';
 import {Event, useTrackPlayerEvents} from 'react-native-track-player';
-import {nowPlaying} from '../player/controller';
+import {nowPlaying, subscribeNowPlaying} from '../player/controller';
 import type {Song} from '../types';
 
 // Minimal "what's currently loaded" subscription for the persistent mini
@@ -13,6 +13,10 @@ export function useNowPlayingSong(): Song | null {
   const [song, setSong] = useState<Song | null>(() => nowPlaying());
   const refresh = useCallback(() => setSong(nowPlaying()), []);
   useTrackPlayerEvents([Event.PlaybackActiveTrackChanged], refresh);
+  // Also react to controller-side now-playing changes that DON'T fire a native
+  // track event -- notably a session restore (restoreForDisplay sets `current`
+  // without touching the native player), so the restored song shows immediately.
+  useEffect(() => subscribeNowPlaying(refresh), [refresh]);
   useEffect(() => {
     refresh();
   }, [refresh]);
