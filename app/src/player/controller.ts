@@ -251,6 +251,11 @@ async function loadCurrent(song: Song): Promise<boolean> {
   await TrackPlayer.add(toTrack(song, stream));
   await TrackPlayer.play();
   holdPlaybackLocks(); // keep Wi-Fi/CPU awake so background resolves keep flowing
+  // A track actually loaded -> no longer just displaying a restored session.
+  // Cleared HERE (on success), not when resume is merely attempted, so a resume
+  // that fails to resolve (flaky network) stays resumable -- the play button
+  // remains a real Play and a later tap retries.
+  awaitingResume = false;
   current = song;
   windowNextId = null;
   clearPreloadRetry(); // fresh song -> any pending retry targets the old next
@@ -602,19 +607,46 @@ export function nowPlaying(): Song | null {
 //      (session.playPressed -> loadAtPosition), which builds a fresh source and
 //      resumes playback.
 
+// True from a restored session's display until it's actually resumed (first
+// play press) or superseded by a new playback. While set, the UI treats the
+// shown song as PAUSED-and-resumable (not "loading") even though no native
+// track is loaded yet -- so the player's play button is a real Play, not a
+// dead spinner.
+let awaitingResume = false;
+let resumePositionS = 0;
+
+export function isAwaitingResume(): boolean {
+  return awaitingResume;
+}
+
 /**
- * Show a restored song in the mini player without starting playback. No native
- * TrackPlayer calls -- `source` stays null, so a play press routes through
- * session.playPressed()'s resume path rather than togglePlayPause.
+ * Show a restored session without starting playback. The REBUILT source is set
+ * (so the UI shows the real mode -- vibe drift/lock + mood, or radio -- and can
+ * preview the next pick), but NO native TrackPlayer call happens: the track is
+ * only loaded on the first play press (resumeAwaiting), seeking to positionS.
  */
-export function restoreForDisplay(song: Song): void {
-  source = null;
-  timeline = [];
+export function restoreForDisplay(song: Song, src: QueueSource, positionS: number): void {
+  source = src;
+  timeline = [song];
   pos = 0;
   activePos = 0;
   windowNextId = null;
   current = song;
+  awaitingResume = true;
+  resumePositionS = positionS;
   emitNowPlaying();
+}
+
+/**
+ * Resume a restored session: load its (already-rebuilt) source's current song
+ * into the native player and seek to where the user left off. Called by the
+ * first play press while isAwaitingResume().
+ */
+export async function resumeAwaiting(): Promise<void> {
+  if (!source || !current) return;
+  // awaitingResume is cleared inside loadCurrent ON SUCCESS (not here), so a
+  // resume that fails to resolve stays retryable on the next play press.
+  await loadAtPosition(source, current, resumePositionS);
 }
 
 /**

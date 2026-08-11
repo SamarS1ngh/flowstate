@@ -42,6 +42,7 @@ import {
   currentSource,
   consumeFallbackStatus,
   invalidateWindow,
+  isAwaitingResume,
   isRepeatOne,
   nowPlaying,
   peekNextSong,
@@ -281,8 +282,15 @@ export default function PlayerScreen({navigation}: Props) {
   // tap to play") for that whole window even though it's actually loading.
   const pbState = playbackState.state;
   const notActiveYet = !!song && song.videoId !== activeVideoId();
+  // A restored-but-not-yet-resumed session has a song + rebuilt source but NO
+  // native track loaded, so notActiveYet is true -- but it's PAUSED-and-
+  // resumable, not "loading". Without this the transport play button would be a
+  // dead spinner and you couldn't resume from the full player (only the mini
+  // bar's button worked). While awaiting resume, show a real Play button.
+  const awaitingResume = isAwaitingResume();
   const isLoading =
     !!song &&
+    !awaitingResume &&
     fallbackStatus !== 'error' &&
     (notActiveYet ||
       pbState === State.None ||

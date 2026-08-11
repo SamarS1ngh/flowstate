@@ -18,10 +18,11 @@ import {openVibesDb} from '../db/vibesDb';
 import {FeedbackStore} from '../engine/feedbackStore';
 import {
   currentSource,
-  loadAtPosition,
+  isAwaitingResume,
   nowPlaying,
   reportFallback,
   restoreForDisplay,
+  resumeAwaiting,
   subscribeNowPlaying,
   togglePlayPause,
 } from './controller';
@@ -33,16 +34,6 @@ export interface PlaybackSnapshot {
   positionS: number;
   savedAt: number;
   source: SourceDescriptor;
-}
-
-// A snapshot restored on boot but not yet resumed. While it's set AND no live
-// source exists, the next play press hydrates it (loadAtPosition) instead of
-// toggling an empty player. Cleared once resumed, or once the user starts
-// anything else (a real source supersedes it).
-let pending: PlaybackSnapshot | null = null;
-
-export function hasPendingRestore(): boolean {
-  return pending !== null;
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -120,9 +111,11 @@ export function stopSessionPersistence(): void {
 // ── Restore ─────────────────────────────────────────────────────────────────
 
 /**
- * Load the persisted snapshot (if any) and show its song in the mini player,
- * paused. Does NOT start playback -- the first play press resumes it. Call once
- * during app bootstrap, before the UI renders.
+ * Load the persisted snapshot (if any), REBUILD its queue source, and show it in
+ * the mini/full player -- paused, at the saved mode (vibe drift/lock + mood, or
+ * radio). Does NOT start playback or touch the native player; the first play
+ * press resumes it at the saved position (see controller.resumeAwaiting). Call
+ * once during app bootstrap, before the UI renders.
  */
 export async function restoreSession(): Promise<void> {
   let raw: string | null = null;
@@ -139,27 +132,26 @@ export async function restoreSession(): Promise<void> {
     return; // corrupt entry -> ignore
   }
   if (!snap || !snap.song || !snap.song.videoId) return;
-  pending = snap;
-  restoreForDisplay(snap.song);
+  // Rebuild the real source NOW (not on first play) so the restored player shows
+  // the actual mode -- VIBE·DRIFT/LOCK + mood chip, or RADIO -- instead of a
+  // blank "QUEUE / END OF QUEUE". No network/native call: the vibe queue just
+  // re-seeds off the restored song; radio seeds on resume.
+  const src = await buildSource(snap.source, snap.song);
+  restoreForDisplay(snap.song, src, snap.positionS);
 }
 
 // ── Resume ────────────────────────────────────────────────────────────────────
 
 /**
- * The play/pause handler the UI should call. When a restored-but-not-yet-resumed
- * session is pending (and nothing live is loaded), rebuild its queue and resume
- * at the saved position. Otherwise it's an ordinary play/pause toggle.
+ * The play/pause handler the UI should call. A restored-but-not-yet-resumed
+ * session loads its (already-rebuilt) source at the saved position on the first
+ * press; otherwise it's an ordinary play/pause toggle.
  */
 export async function playPressed(isPlaying: boolean): Promise<void> {
-  if (pending && !currentSource()) {
-    const snap = pending;
-    pending = null;
-    const src = await buildSource(snap.source, snap.song);
-    await loadAtPosition(src, snap.song, snap.positionS);
+  if (isAwaitingResume()) {
+    await resumeAwaiting();
     return;
   }
-  // Any real playback supersedes a stale pending restore.
-  pending = null;
   await togglePlayPause(isPlaying);
 }
 
@@ -206,6 +198,5 @@ async function buildVibeSource(
 
 // Test-only: reset module state between cases.
 export function _resetSessionForTests(): void {
-  pending = null;
   stopSessionPersistence();
 }
