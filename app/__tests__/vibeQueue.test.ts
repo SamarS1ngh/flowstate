@@ -190,6 +190,51 @@ describe('VibeQueue: fallbacks', () => {
   });
 });
 
+describe('VibeQueue: coverage + no-repeat (drift)', () => {
+  test('drift plays every song once before any repeat, traversing all clusters', () => {
+    // 9 songs across 3 well-separated clusters. Session-wide no-repeat + the
+    // reach-anywhere-for-a-fresh-song step must play ALL nine (i.e. visit all
+    // three clusters) before anything repeats -- not orbit the seed's cluster.
+    const q = new VibeQueue(a1, 'drift', baseDeps({rng: () => 0}));
+    const seen = new Set<string>([a1.videoId]);
+    let last: Song | null = a1.song;
+    for (let i = 0; i < 8; i++) {
+      const p = q.next(last);
+      expect(p).not.toBeNull();
+      expect(seen.has(p!.videoId)).toBe(false); // never a repeat while fresh songs remain
+      seen.add(p!.videoId);
+      last = p;
+    }
+    expect(seen.size).toBe(9); // full coverage
+  });
+
+  test('after full coverage it keeps playing (soft repeat, never dead-ends)', () => {
+    const q = new VibeQueue(a1, 'drift', baseDeps({rng: () => 0}));
+    let last: Song | null = a1.song;
+    for (let i = 0; i < 8; i++) last = q.next(last);
+    const ninth = q.next(last); // scope exhausted this session
+    expect(ninth).not.toBeNull(); // soft-repeats rather than returning null
+  });
+
+  test('drift explores into a far cluster before a big near cluster is exhausted', () => {
+    // 14 near-identical "A" songs (all mutually high-cosine) + 3 far "B" songs.
+    // Without the periodic exploration hop, no-repeat drift would stay inside A
+    // for ~14 picks; the hop must reach B sooner.
+    const A = Array.from({length: 14}, (_, i) => vsong('A' + i, [1, 0.02 * i, 0]));
+    const B = [vsong('B0', [0, 1, 0]), vsong('B1', [0.1, 0.99, 0]), vsong('B2', [0, 0.99, 0.1])];
+    const q = new VibeQueue(A[0], 'drift', baseDeps({songs: [...A, ...B], rng: () => 0.5}));
+    const picks: string[] = [];
+    let last: Song | null = A[0].song;
+    for (let i = 0; i < 13; i++) {
+      const p: Song | null = q.next(last);
+      expect(p).not.toBeNull();
+      picks.push(p!.videoId);
+      last = p;
+    }
+    expect(picks.some(id => id.startsWith('B'))).toBe(true);
+  });
+});
+
 describe('VibeQueue: determinism', () => {
   test('same seed/mode/deps/rng sequence produces the same pick sequence', () => {
     const run = () => {

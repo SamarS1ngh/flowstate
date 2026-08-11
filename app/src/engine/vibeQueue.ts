@@ -9,9 +9,18 @@ export type VibeMode = 'lock' | 'drift';
 const LOCK_THRESHOLD = 0.75;
 const DRIFT_THRESHOLD = 0.65;
 const RELAX_DELTA = 0.1;
-// Same horizon recencyFactor uses to fully stop suppressing a song. Reused
-// here so the uniform-random fallback doesn't immediately replay something
-// the weighted path was actively suppressing.
+// How far drift keeps widening the similarity threshold, step by step, to find
+// a song it hasn't played yet this session before giving up on the neighborhood
+// and reaching anywhere. Lock stays tight (one relax step only); drift grows
+// outward from the current cluster.
+const DRIFT_WIDEN_FLOOR = 0.45;
+// Every N drift picks, deliberately jump to a FAR, unplayed song to escape the
+// current similarity cluster. This is what makes drift traverse the whole
+// library over a long session instead of orbiting one neighborhood forever.
+const EXPLORE_EVERY = 12;
+// Same horizon recencyFactor uses to fully stop suppressing a song. Reused so
+// the exhausted-scope soft-repeat fallback doesn't immediately replay something
+// just played.
 const RECENCY_HORIZON = 25;
 
 export interface VibeQueueDeps {
@@ -33,9 +42,12 @@ export class VibeQueue implements QueueSource {
   private readonly onFallback?: (kind: 'relaxed' | 'random') => void;
   private moodFilter: {key: string; min: number} | null = null;
   private readonly sessionBans = new Set<string>();
-  // Ordered play-history: seed + every song returned by next(). Used only
-  // for recencyFactor's songsSince lookup -- never mutated by lastPlayed.
+  // Ordered play-history: seed + every song returned by next(). Used for
+  // recencyFactor's songsSince lookup AND the session-wide "already played"
+  // check (isFresh) -- never mutated by lastPlayed.
   private history: VibeSong[];
+  // Count of pick computations, drives the periodic drift exploration hop.
+  private driftPicks = 0;
   // The next pick committed by peekNext() (for stream prefetch), consumed by
   // next(). Cleared whenever the state it was picked under changes (reject,
   // mode, mood filter, reset) so a stale pick is never played.
@@ -114,52 +126,107 @@ export class VibeQueue implements QueueSource {
     return picked.song.song;
   }
 
-  // Shared pick logic for both next() and peekNext(): weighted pick at the
-  // primary threshold, then a relaxed retry, then a uniform-random fallback.
-  // `silent` suppresses the onFallback callbacks so peekNext() (which runs
-  // ahead of playback) doesn't flash a stale "relaxed/random" status; next()
-  // re-emits it from the committed pick's `kind` when the song actually plays.
+  // Shared pick logic for both next() and peekNext(). The whole design goal is
+  // to NEVER repeat a song until the reachable scope is genuinely exhausted, and
+  // (in drift) to keep moving into new regions so a long session traverses the
+  // whole library instead of orbiting one similarity cluster. `silent`
+  // suppresses onFallback so peekNext (which runs ahead) doesn't flash a stale
+  // status; next() re-emits it from the committed pick's `kind`.
   private pickFrom(
     center: VibeSong,
     silent: boolean,
   ): {song: VibeSong; kind: 'primary' | 'relaxed' | 'random'} | null {
+    const n = this.driftPicks;
+    this.driftPicks = n + 1;
     const primaryThreshold = this.mode === 'lock' ? LOCK_THRESHOLD : DRIFT_THRESHOLD;
+
+    // (#3) Exploration hop -- drift only, every EXPLORE_EVERY picks: jump to a
+    // FAR, unplayed song so the vibe leaves the current cluster instead of
+    // orbiting it. A deliberate move, not a fallback, so no status is flashed.
+    if (this.mode === 'drift' && n > 0 && n % EXPLORE_EVERY === 0) {
+      const jump = this.freshAnywhere(center, true);
+      if (jump) return {song: jump, kind: 'primary'};
+    }
+
+    // (#1) Prefer NEVER-played songs. The tight pool, fresh only.
     const primary = this.weightedCandidates(center, primaryThreshold);
-    // Use the tight (primary) pool only while it still offers a FRESH song --
-    // one not played within the recency horizon. If it's exhausted (empty, OR
-    // every eligible song was just played), relax the threshold to pull in new
-    // songs instead of cycling the same few. This is what stops lock + a narrow
-    // mood on a small analyzed library from looping 4-5 tracks forever.
-    if (primary.length > 0 && this.hasFreshCandidate(primary)) {
-      const s = samplePick(primary, this.rng);
+    const primaryFresh = primary.filter(c => this.isFresh(c.item.videoId));
+    if (primaryFresh.length > 0) {
+      const s = samplePick(primaryFresh, this.rng);
       if (s) return {song: s, kind: 'primary'};
     }
+
+    // (#2) Widen the threshold step by step to find the NEAREST fresh song.
+    // Lock takes a single relax step (stays tight); drift grows outward down to
+    // DRIFT_WIDEN_FLOOR before giving up on the neighborhood.
     if (!silent) this.onFallback?.('relaxed');
-    const relaxed = this.weightedCandidates(center, primaryThreshold - RELAX_DELTA);
-    if (relaxed.length > 0 && this.hasFreshCandidate(relaxed)) {
-      const s = samplePick(relaxed, this.rng);
-      if (s) return {song: s, kind: 'relaxed'};
+    const widenFloor = this.mode === 'lock' ? LOCK_THRESHOLD - RELAX_DELTA : DRIFT_WIDEN_FLOOR;
+    let widest: Array<{item: VibeSong; weight: number}> = [];
+    for (let th = primaryThreshold - RELAX_DELTA; th >= widenFloor - 1e-9; th -= RELAX_DELTA) {
+      widest = this.weightedCandidates(center, th);
+      const fresh = widest.filter(c => this.isFresh(c.item.videoId));
+      if (fresh.length > 0) {
+        const s = samplePick(fresh, this.rng);
+        if (s) return {song: s, kind: 'relaxed'};
+      }
     }
-    // No fresh option even after relaxing. Prefer any relaxed/primary candidate
-    // over a uniform-random jump -- a soft repeat still keeps the vibe.
-    if (relaxed.length > 0) {
-      const s = samplePick(relaxed, this.rng);
+
+    // Nothing fresh in the widened cone -> reach ANYWHERE in the library for a
+    // song not yet played this session (mood + bans still respected). This is
+    // what guarantees full coverage before any repeat.
+    if (!silent) this.onFallback?.('random');
+    const anyFresh = this.freshAnywhere(center, false);
+    if (anyFresh) return {song: anyFresh, kind: 'random'};
+
+    // Everything eligible has been played this session -> allow a SOFT repeat,
+    // favouring the least-recently-played (recencyFactor). Never returns null
+    // while any non-banned song exists.
+    if (widest.length > 0) {
+      const s = samplePick(widest, this.rng);
       if (s) return {song: s, kind: 'relaxed'};
     }
     if (primary.length > 0) {
       const s = samplePick(primary, this.rng);
       if (s) return {song: s, kind: 'primary'};
     }
-    if (!silent) this.onFallback?.('random');
     const picked = this.randomFallback(center);
     if (picked) return {song: picked, kind: 'random'};
     return null;
   }
 
-  // A pool is "exhausted" when none of its songs are fresh -- i.e. every one was
-  // played within the recency horizon, so any pick would be a near-term repeat.
-  private hasFreshCandidate(weighted: Array<{item: VibeSong}>): boolean {
-    return weighted.some(w => this.songsSince(w.item.videoId) >= RECENCY_HORIZON);
+  // True while `videoId` has NOT been played at all this session -- the
+  // session-wide no-repeat rule (vs the old "not within the last 25").
+  private isFresh(videoId: string): boolean {
+    return this.songsSince(videoId) === Infinity;
+  }
+
+  private moodOk(s: VibeSong): boolean {
+    if (!this.moodFilter) return true;
+    const v = s.moods[this.moodFilter.key];
+    return v !== undefined && v >= this.moodFilter.min;
+  }
+
+  // A song not yet played this session, from anywhere in scope (mood + bans
+  // respected). `preferFar` biases toward songs DISSIMILAR to `center` so a
+  // drift exploration hop lands in a genuinely new region; otherwise uniform.
+  private freshAnywhere(center: VibeSong, preferFar: boolean): VibeSong | null {
+    const fresh = this.songs.filter(
+      s =>
+        s.videoId !== center.videoId &&
+        !this.sessionBans.has(s.videoId) &&
+        this.moodOk(s) &&
+        this.isFresh(s.videoId),
+    );
+    if (fresh.length === 0) return null;
+    if (!preferFar) {
+      const idx = Math.min(fresh.length - 1, Math.floor(this.rng() * fresh.length));
+      return fresh[idx];
+    }
+    const weighted = fresh.map(s => ({
+      item: s,
+      weight: Math.max(0.01, 1 - cosine(center.embedding, s.embedding)),
+    }));
+    return samplePick(weighted, this.rng);
   }
 
   reset(seed: Song): void {
@@ -171,6 +238,7 @@ export class VibeQueue implements QueueSource {
     }
     this.seed = found;
     this.history = [found];
+    this.driftPicks = 0; // new seed -> restart the exploration cadence
     this.pending = null; // new seed -> discard any committed next pick
   }
 
