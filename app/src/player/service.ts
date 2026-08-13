@@ -25,6 +25,10 @@ import {
 export async function playbackService(): Promise<void> {
   TrackPlayer.addEventListener(Event.RemotePlay, () => TrackPlayer.play());
   TrackPlayer.addEventListener(Event.RemotePause, () => TrackPlayer.pause());
+  // Dragging the notification / lock-screen scrubber. Capability.SeekTo (see
+  // App.tsx) makes the scrubber appear, but without this handler the drag did
+  // nothing -- the RemoteSeek event was unhandled. `position` is in seconds.
+  TrackPlayer.addEventListener(Event.RemoteSeek, e => TrackPlayer.seekTo(e.position));
   // immediate=true: commit the skip now, not via the debounce timer -- remote
   // skips must work while the app is backgrounded, where JS timers are frozen
   // (see controller.scheduleSeek).
