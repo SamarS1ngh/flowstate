@@ -68,6 +68,7 @@ jest.mock('../src/offline/downloads', () => ({
 jest.mock('../src/player/prefetchCache', () => ({
   __esModule: true,
   getPrefetchedStream: jest.fn().mockReturnValue(null),
+  invalidatePrefetch: jest.fn(),
   requestPrefetch: jest.fn(),
   requestPrefetchQueue: jest.fn(),
 }));
@@ -88,6 +89,7 @@ import {
   nowPlaying,
   consumeFallbackStatus,
   invalidateWindow,
+  handlePlaybackError,
   _resetControllerForTests,
 } from '../src/player/controller';
 
@@ -352,6 +354,40 @@ describe('failure handling', () => {
     // Must NOT churn through the library trying other songs.
     expect(resolveMock.mock.calls.length).toBeLessThanOrEqual(2);
     expect(nowPlaying()?.videoId).toBe('seed'); // stayed on the chosen song
+    expect(tp.stop).toHaveBeenCalled();
+    expect(consumeFallbackStatus()).toBe('error');
+  });
+
+  test('a playback error re-resolves the SAME song fresh and recovers -- no error flag', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
+    await settle();
+    resolveMock.mockClear();
+    tp.stop.mockClear();
+
+    await handlePlaybackError(); // stale URL died -> re-resolve + resume
+    await settle();
+
+    // Re-resolved the CURRENT song fresh (not skipped to another).
+    expect(resolveMock.mock.calls.some(c => c[0] === 'a')).toBe(true);
+    expect(nowPlaying()?.videoId).toBe('a');
+    expect(tp.stop).not.toHaveBeenCalled();
+    expect(consumeFallbackStatus()).toBeNull(); // recovered silently
+  });
+
+  test('after the retry budget, a playback error stops and flags error', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
+    await settle();
+    // Every fresh re-resolve now fails -> recovery can't succeed.
+    resolveMock.mockRejectedValue(new Error('dead'));
+
+    await handlePlaybackError();
+    await settle();
+    await handlePlaybackError();
+    await settle();
+    await handlePlaybackError();
+    await settle();
+
+    expect(nowPlaying()?.videoId).toBe('a'); // never jumped to another song
     expect(tp.stop).toHaveBeenCalled();
     expect(consumeFallbackStatus()).toBe('error');
   });

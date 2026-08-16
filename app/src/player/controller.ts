@@ -2,7 +2,12 @@ import TrackPlayer, {RepeatMode} from 'react-native-track-player';
 import {Song} from '../types';
 import {resolveStreamUrl, StreamResolveError} from '../stream/resolver';
 import {offlineUrl} from '../offline/downloads';
-import {getPrefetchedStream, requestPrefetch, requestPrefetchQueue} from './prefetchCache';
+import {
+  getPrefetchedStream,
+  invalidatePrefetch,
+  requestPrefetch,
+  requestPrefetchQueue,
+} from './prefetchCache';
 import {QueueSource} from './queue';
 import {holdPlaybackLocks, releasePlaybackLocks} from './playbackLocks';
 import {thumbUrl} from '../ui/thumb';
@@ -50,6 +55,14 @@ let preloadRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let preloadFailStreak = 0;
 const PRELOAD_MAX_RETRIES = 3;
 const PRELOAD_RETRY_BASE_MS = 3000;
+// Bounded auto re-resolve on a playback error. googlevideo URLs expire / get
+// IP-throttled / 403 constantly and connections drop mid-stream, so a single
+// error usually just means "that URL went stale" -- re-resolving the SAME song
+// fresh recovers it (this is what the official/unofficial YT apps do silently).
+// Bounded per-song so a genuinely dead song can't loop forever; reset whenever a
+// track loads cleanly.
+let playbackErrorRetries = 0;
+const PLAYBACK_ERROR_MAX_RETRIES = 2;
 function clearPreloadRetry(): void {
   if (preloadRetryTimer) {
     clearTimeout(preloadRetryTimer);
@@ -258,6 +271,7 @@ async function loadCurrent(song: Song): Promise<boolean> {
   awaitingResume = false;
   current = song;
   windowNextId = null;
+  playbackErrorRetries = 0; // clean load -> reset the per-song error retry budget
   clearPreloadRetry(); // fresh song -> any pending retry targets the old next
   emitNowPlaying();
   return true;
@@ -518,13 +532,81 @@ export function onActiveTrackChanged(): Promise<void> {
 // the error on the current song and STOP rather than stalling on an endless
 // spinner or churning onward. Ignored mid-seek (a reset/re-add can briefly
 // surface a transient error that isn't real).
-export function handlePlaybackError(): Promise<void> {
-  if (seekActive) return Promise.resolve();
-  return serialize(async () => {
-    if (current) {
-      fallbackBySong.set(current.videoId, 'error');
-      emitNowPlaying();
+export async function handlePlaybackError(): Promise<void> {
+  // Ignore transient errors our own reset/re-add can surface mid-seek.
+  if (seekActive) return;
+  const song = current;
+  if (!song) {
+    await serialize(async () => {
+      await TrackPlayer.stop().catch(() => {});
+      releasePlaybackLocks();
+    });
+    return;
+  }
+
+  // Out of retries for this song -> surface the error and stop (old behaviour).
+  if (playbackErrorRetries >= PLAYBACK_ERROR_MAX_RETRIES) {
+    await failCurrent(song);
+    return;
+  }
+  playbackErrorRetries += 1;
+
+  // The URL we were handed went bad -> drop it from the prefetch cache so the
+  // fresh re-resolve below isn't immediately undone by the cache handing the
+  // same dead URL back.
+  invalidatePrefetch(song.videoId);
+
+  // Where playback died, so we can resume there (a mid-stream drop) instead of
+  // restarting the whole track.
+  let posS = 0;
+  try {
+    posS = (await TrackPlayer.getProgress()).position ?? 0;
+  } catch {
+    // position unknown -> resume from 0
+  }
+
+  // Re-resolve a FRESH stream URL OFF the serialize chain -- a hung resolve must
+  // never deadlock the queue (same rule as commitSeek).
+  let stream: Stream | null = null;
+  try {
+    stream = await withTimeout(resolveWithRetry(song), RESOLVE_TIMEOUT_MS);
+  } catch {
+    stream = null;
+  }
+
+  // The user skipped away while we were resolving -> abandon this recovery.
+  if (current?.videoId !== song.videoId) return;
+  if (!stream) {
+    await failCurrent(song);
+    return;
+  }
+
+  // Swap in the fresh URL and resume where it died. Only native calls serialized.
+  await serialize(async () => {
+    if (current?.videoId !== song.videoId) return;
+    await TrackPlayer.reset();
+    await TrackPlayer.add(toTrack(song, stream!));
+    await TrackPlayer.play();
+    holdPlaybackLocks();
+    windowNextId = null;
+    emitNowPlaying();
+    if (posS > 1) {
+      try {
+        await TrackPlayer.seekTo(posS);
+      } catch {
+        // best-effort resume; playback already started from 0 if seek failed
+      }
     }
+  });
+  void preloadNext();
+}
+
+// Give up on `song`: flag the error so the UI can offer retry/skip, and stop.
+async function failCurrent(song: Song): Promise<void> {
+  await serialize(async () => {
+    if (current?.videoId !== song.videoId) return;
+    fallbackBySong.set(song.videoId, 'error');
+    emitNowPlaying();
     await TrackPlayer.stop().catch(() => {});
     releasePlaybackLocks();
   });

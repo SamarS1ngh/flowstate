@@ -100,6 +100,17 @@ export function requestPrefetchQueue(songs: Song[]): void {
   void pump();
 }
 
+/**
+ * Drop a cached resolve for `videoId`. Called when its stream URL turned out to
+ * be dead/expired (a playback error), so the controller's fresh re-resolve
+ * isn't undone by this cache handing the same bad URL back later.
+ */
+export function invalidatePrefetch(videoId: string): void {
+  done.delete(videoId);
+  const i = lru.indexOf(videoId);
+  if (i >= 0) lru.splice(i, 1);
+}
+
 /** The pre-resolved stream for a song, or null if not prefetched. */
 export function getPrefetchedStream(videoId: string): Stream | null {
   const s = done.get(videoId);
