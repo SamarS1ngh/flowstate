@@ -77,14 +77,14 @@ test('one resolve at a time; rapid requests coalesce to the LATEST target', asyn
 });
 
 test('evicts to a bounded cache', async () => {
-  // MAX_CACHED = 16. Cache 17 distinct ids -> the oldest is evicted.
-  const ids = Array.from({length: 17}, (_, i) => `s${i}`);
+  // MAX_CACHED = 64. Cache 65 distinct ids -> the oldest is evicted.
+  const ids = Array.from({length: 65}, (_, i) => `s${i}`);
   for (const id of ids) {
     requestPrefetch(song(id));
     await settle();
     pending.find(p => p.id === id)!.done();
     await settle();
   }
-  expect(getPrefetchedStream('s0')).toBeNull(); // oldest of 17 evicted
-  expect(getPrefetchedStream('s16')).not.toBeNull(); // newest kept
+  expect(getPrefetchedStream('s0')).toBeNull(); // oldest of 65 evicted
+  expect(getPrefetchedStream('s64')).not.toBeNull(); // newest kept
 });

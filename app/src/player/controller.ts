@@ -63,6 +63,15 @@ const PRELOAD_RETRY_BASE_MS = 3000;
 // track loads cleanly.
 let playbackErrorRetries = 0;
 const PLAYBACK_ERROR_MAX_RETRIES = 2;
+// When YouTube rate-limits us (HTTP 403/429 on the media stream), a fresh
+// re-resolve just yields another URL that 403s the same way -- retrying only
+// piles on MORE load. So on a rate-limit we stop re-resolving and pause the
+// automatic prefetch/preload burst for a cooldown, letting the limit ease.
+let rateLimitedUntil = 0;
+const RATE_LIMIT_COOLDOWN_MS = 90_000;
+function markRateLimited(): void {
+  rateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+}
 function clearPreloadRetry(): void {
   if (preloadRetryTimer) {
     clearTimeout(preloadRetryTimer);
@@ -235,9 +244,10 @@ function nextAfterActive(): Song | null {
 // source's real next() -- works for vibe AND plain queues) and prefetch those
 // URLs. The 1-deep native preload then always hits the cache, so every skip
 // stays a native queue advance with no network on its path.
-const PREFETCH_AHEAD = 12;
+const PREFETCH_AHEAD = 3;
 function prefetchAhead(): void {
   if (!source) return;
+  if (Date.now() < rateLimitedUntil) return; // backing off -> don't add resolve load
   // Commit the timeline a few picks ahead (idempotent -- extendTimeline only
   // grows it; preloadNext reuses the same committed entries).
   while (timeline.length <= activePos + PREFETCH_AHEAD) {
@@ -287,6 +297,7 @@ async function loadCurrent(song: Song): Promise<boolean> {
 // end-of-track-doesn't-advance bug).
 function preloadNext(): Promise<void> {
   if (windowNextId) return Promise.resolve();
+  if (Date.now() < rateLimitedUntil) return Promise.resolve(); // backing off -> no gapless preload
   if (preloadPromise) return preloadPromise;
   preloadPromise = (async () => {
     try {
@@ -532,7 +543,7 @@ export function onActiveTrackChanged(): Promise<void> {
 // the error on the current song and STOP rather than stalling on an endless
 // spinner or churning onward. Ignored mid-seek (a reset/re-add can briefly
 // surface a transient error that isn't real).
-export async function handlePlaybackError(): Promise<void> {
+export async function handlePlaybackError(event?: {code?: string; message?: string}): Promise<void> {
   // Ignore transient errors our own reset/re-add can surface mid-seek.
   if (seekActive) return;
   const song = current;
@@ -544,8 +555,22 @@ export async function handlePlaybackError(): Promise<void> {
     return;
   }
 
-  // Out of retries for this song -> surface the error and stop (old behaviour).
+  // Rate-limit (HTTP 403/429 on the media stream): re-resolving is futile -- a
+  // fresh URL 403s the same way -- and only adds load. Stop, and back off the
+  // automatic prefetch/preload so the limit can ease. Detected from the error
+  // text, or assumed once we're already inside a cooldown.
+  const errText = `${event?.code ?? ''} ${event?.message ?? ''}`;
+  const rateLimited = /\b(403|429)\b/.test(errText) || Date.now() < rateLimitedUntil;
+  if (rateLimited) {
+    markRateLimited();
+    await failCurrent(song);
+    return;
+  }
+
+  // Out of retries for this song -> repeated failure is probably a rate-limit we
+  // couldn't read from the message; back off too, then surface the error.
   if (playbackErrorRetries >= PLAYBACK_ERROR_MAX_RETRIES) {
+    markRateLimited();
     await failCurrent(song);
     return;
   }
@@ -808,6 +833,9 @@ export function _resetControllerForTests(): void {
   repeatOne = false;
   preloadPromise = null;
   clearPreloadRetry();
+  playbackErrorRetries = 0;
+  rateLimitedUntil = 0;
+  awaitingResume = false;
   pendingFallback = null;
   fallbackBySong.clear();
   cancelSeek();

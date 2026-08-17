@@ -23,8 +23,16 @@ type Stream = {url: string; headers?: Record<string, string>};
 // the background (the OS freezes the app's network there), so we resolve the
 // next several songs' URLs WHILE FOREGROUND and cache them. A backgrounded skip
 // then finds its target already resolved and never has to hit the network.
-const MAX_CACHED = 16;
-const MAX_PREFETCH_DEPTH = 12;
+// Larger cache so already-resolved songs are REUSED across the session (a
+// googlevideo URL stays valid for hours) instead of re-resolved -- fewer
+// resolves = less YouTube rate-limiting.
+const MAX_CACHED = 64;
+// Shallow prefetch: only a couple of songs ahead. A deep buffer fired a BURST of
+// ~12 resolves on every play, which is exactly what trips YouTube's rate limiter
+// (403 on the media GET). Native-HTTP resolution (see resolver) already makes a
+// backgrounded skip resolve fine, so the deep background buffer is no longer
+// needed to keep skipping working.
+const MAX_PREFETCH_DEPTH = 3;
 
 // videoId -> resolved stream (url + headers). Session-scoped; googlevideo URLs
 // stay valid for hours, and a stale one just fails playback -> skipToNext's

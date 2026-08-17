@@ -49,5 +49,7 @@ export async function playbackService(): Promise<void> {
   TrackPlayer.addEventListener(Event.PlaybackQueueEnded, () => handleQueueEnded());
   // ExoPlayer failed to play the active track (dead URL, connection dropped) --
   // flag the error + stop instead of stalling/churning. See controller.
-  TrackPlayer.addEventListener(Event.PlaybackError, () => handlePlaybackError());
+  // Pass the error through so the controller can tell a rate-limit (HTTP 403/429
+  // -> back off, don't re-resolve) from a transient/dead URL (re-resolve+retry).
+  TrackPlayer.addEventListener(Event.PlaybackError, e => handlePlaybackError(e));
 }

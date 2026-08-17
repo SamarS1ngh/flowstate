@@ -392,6 +392,22 @@ describe('failure handling', () => {
     expect(consumeFallbackStatus()).toBe('error');
   });
 
+  test('a 403 (rate-limit) does NOT re-resolve -- it stops and flags error immediately', async () => {
+    await playFrom(new ListSource(['a', 'b', 'c']), song('a'));
+    await settle();
+    resolveMock.mockClear();
+    tp.stop.mockClear();
+
+    // ExoPlayer surfaces the googlevideo 403 in the error message.
+    await handlePlaybackError({code: 'source-error', message: 'Source error: Response code: 403'});
+    await settle();
+
+    // Re-resolving a rate-limited stream is futile + adds load, so we must NOT.
+    expect(resolveMock).not.toHaveBeenCalled();
+    expect(tp.stop).toHaveBeenCalled();
+    expect(consumeFallbackStatus()).toBe('error');
+  });
+
   test('a hung load-fresh resolve does NOT jam the queue -- a later skip still advances', async () => {
     await playFrom(new ListSource(['a', 'b', 'c', 'd']), song('a'));
     await settle();
