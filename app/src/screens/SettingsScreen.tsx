@@ -19,6 +19,18 @@ import type {NativeStackScreenProps} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../App';
 import IconButton from '../ui/IconButton';
 import {DB_FILENAME, importVibesDb} from '../db/vibesDb';
+import {
+  backupNow,
+  connectDrive,
+  connectedEmail,
+  disableNightlyBackup,
+  disconnectDrive,
+  DriveCancelled,
+  enableNightlyBackup,
+  findBackup,
+  isNightlyBackupOn,
+  restoreFromDrive,
+} from '../backup/drive';
 import {clearAuth, clearOAuthCreds, loadOAuthCreds} from '../auth/authStore';
 import {getStorageInfo, removeAllDownloads} from '../offline/downloads';
 import {colors, radii, spacing} from '../ui/theme';
@@ -64,6 +76,106 @@ export default function SettingsScreen({navigation}: Props) {
   const [clearingDownloads, setClearingDownloads] = useState(false);
   const [batteryExempt, setBatteryExempt] = useState<boolean | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [driveEmail, setDriveEmail] = useState<string | null>(null);
+  const [driveBusy, setDriveBusy] = useState<null | 'connect' | 'backup' | 'restore'>(null);
+  const [lastBackup, setLastBackup] = useState<string | null>(null);
+  const [nightlyOn, setNightlyOn] = useState(false);
+
+  const refreshDrive = useCallback(async () => {
+    const email = await connectedEmail();
+    setDriveEmail(email);
+    setNightlyOn(await isNightlyBackupOn());
+    if (email) {
+      try {
+        const b = await findBackup();
+        setLastBackup(b ? new Date(b.modifiedTime).toLocaleString() : null);
+      } catch {
+        setLastBackup(null);
+      }
+    } else {
+      setLastBackup(null);
+    }
+  }, []);
+
+  const onToggleNightly = async () => {
+    if (nightlyOn) {
+      await disableNightlyBackup();
+      setNightlyOn(false);
+    } else {
+      await enableNightlyBackup();
+      setNightlyOn(true);
+    }
+  };
+
+  const onConnectDrive = async () => {
+    setDriveBusy('connect');
+    try {
+      const email = await connectDrive();
+      setDriveEmail(email);
+      // Turn on the nightly 2 AM auto-backup by default when they connect.
+      await enableNightlyBackup();
+      setNightlyOn(true);
+      await refreshDrive();
+    } catch (e) {
+      if (!(e instanceof DriveCancelled)) {
+        Alert.alert('Google sign-in failed', e instanceof Error ? e.message : 'Unknown error');
+      }
+    } finally {
+      setDriveBusy(null);
+    }
+  };
+
+  const onBackupDrive = async () => {
+    setDriveBusy('backup');
+    try {
+      const info = await backupNow();
+      setLastBackup(new Date(info.modifiedTime).toLocaleString());
+      Alert.alert('Backed up', 'Your analysis data is saved to Google Drive.');
+    } catch (e) {
+      Alert.alert('Backup failed', e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setDriveBusy(null);
+    }
+  };
+
+  const onRestoreDrive = async () => {
+    Alert.alert(
+      'Restore from Drive?',
+      'This replaces the analysis data on this device with your Google Drive backup.',
+      [
+        {text: 'Cancel', style: 'cancel'},
+        {
+          text: 'Restore',
+          style: 'destructive',
+          onPress: async () => {
+            setDriveBusy('restore');
+            try {
+              const ok = await restoreFromDrive();
+              if (!ok) {
+                Alert.alert('Nothing to restore', 'No backup found in your Google Drive yet.');
+                return;
+              }
+              Alert.alert('Restored', 'Analysis data restored from Google Drive.', [
+                {text: 'OK', onPress: () => navigation.navigate('Library')},
+              ]);
+            } catch (e) {
+              Alert.alert('Restore failed', e instanceof Error ? e.message : 'Unknown error');
+            } finally {
+              setDriveBusy(null);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const onDisconnectDrive = async () => {
+    await disableNightlyBackup();
+    await disconnectDrive();
+    setDriveEmail(null);
+    setLastBackup(null);
+    setNightlyOn(false);
+  };
 
   const refreshBatteryExempt = useCallback(() => {
     const svc = NativeModules.AnalysisService as
@@ -107,6 +219,7 @@ export default function SettingsScreen({navigation}: Props) {
     useCallback(() => {
       let cancelled = false;
       refreshBatteryExempt();
+      void refreshDrive();
       void isAutoAnalyzeEnabled().then(v => {
         if (!cancelled) setAutoAnalyze(v);
       });
@@ -481,6 +594,71 @@ export default function SettingsScreen({navigation}: Props) {
             <Text style={styles.buttonSecondaryText}>Export analysis DB</Text>
           )}
         </Pressable>
+      </View>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Cloud backup (Google Drive)</Text>
+        <Text style={styles.sectionBody}>
+          Back up your analyzed data to your own Google Drive (a hidden per-app
+          folder — invisible in Drive, can't touch your files). Restore it after a
+          reinstall so you never re-analyze from scratch.
+        </Text>
+        {driveEmail ? (
+          <>
+            <Text style={styles.sectionBody}>
+              Connected: {driveEmail}
+              {lastBackup ? `\nLast backup: ${lastBackup}` : '\nNo backup yet'}
+            </Text>
+            <View style={[styles.toggleRow, {marginBottom: spacing.lg}]}>
+              <Text style={[styles.sectionTitle, {flex: 1, marginBottom: 0}]}>
+                Auto-backup nightly (2 AM)
+              </Text>
+              <Switch
+                value={nightlyOn}
+                onValueChange={onToggleNightly}
+                trackColor={{true: colors.accent, false: colors.border}}
+                thumbColor={colors.white}
+              />
+            </View>
+            <Pressable
+              style={[styles.button, driveBusy !== null && styles.buttonDisabled]}
+              disabled={driveBusy !== null}
+              onPress={onBackupDrive}>
+              {driveBusy === 'backup' ? (
+                <ActivityIndicator color={colors.black} />
+              ) : (
+                <Text style={styles.buttonText}>Back up now</Text>
+              )}
+            </Pressable>
+            <Pressable
+              style={[styles.button, styles.buttonSecondary, driveBusy !== null && styles.buttonDisabled]}
+              disabled={driveBusy !== null}
+              onPress={onRestoreDrive}>
+              {driveBusy === 'restore' ? (
+                <ActivityIndicator color={colors.textPrimary} />
+              ) : (
+                <Text style={styles.buttonSecondaryText}>Restore from Google Drive</Text>
+              )}
+            </Pressable>
+            <Pressable
+              style={[styles.button, styles.buttonSecondary, driveBusy !== null && styles.buttonDisabled]}
+              disabled={driveBusy !== null}
+              onPress={onDisconnectDrive}>
+              <Text style={styles.buttonSecondaryText}>Disconnect</Text>
+            </Pressable>
+          </>
+        ) : (
+          <Pressable
+            style={[styles.button, driveBusy !== null && styles.buttonDisabled]}
+            disabled={driveBusy !== null}
+            onPress={onConnectDrive}>
+            {driveBusy === 'connect' ? (
+              <ActivityIndicator color={colors.black} />
+            ) : (
+              <Text style={styles.buttonText}>Connect Google Drive</Text>
+            )}
+          </Pressable>
+        )}
       </View>
 
       <View style={styles.section}>

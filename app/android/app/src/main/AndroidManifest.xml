@@ -17,6 +17,12 @@
     <!-- Lets the user exempt the app from battery optimization so on-device
          analysis isn't App-Standby-throttled while the screen is locked. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Nightly Drive backup at ~2 AM: an exact alarm (USE_EXACT_ALARM grants it
+         without a runtime prompt, fine for a sideloaded alarm-style feature),
+         re-armed after reboot (RECEIVE_BOOT_COMPLETED since alarms clear on
+         reboot). See BackupSchedulerModule / BackupAlarmReceiver. -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
       android:name=".MainApplication"
@@ -48,5 +54,21 @@
         android:name=".AnalysisForegroundService"
         android:exported="false"
         android:foregroundServiceType="dataSync" />
+      <!-- Nightly Google Drive backup (HeadlessJsTaskService fired by the 2 AM
+           alarm). Same dataSync foreground type as analysis. -->
+      <service
+        android:name=".BackupTaskService"
+        android:exported="false"
+        android:foregroundServiceType="dataSync" />
+      <receiver
+        android:name=".BackupAlarmReceiver"
+        android:exported="false" />
+      <receiver
+        android:name=".BackupBootReceiver"
+        android:exported="true">
+        <intent-filter>
+          <action android:name="android.intent.action.BOOT_COMPLETED" />
+        </intent-filter>
+      </receiver>
     </application>
 </manifest>

@@ -13,6 +13,7 @@ class AudioMelPackage : ReactPackage {
             AudioMelModule(reactContext),
             AnalysisServiceModule(reactContext),
             NativeHttpModule(reactContext),
+            BackupSchedulerModule(reactContext),
         )
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =
