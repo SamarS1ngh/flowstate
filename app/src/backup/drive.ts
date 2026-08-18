@@ -229,3 +229,16 @@ export async function isNightlyBackupOn(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Re-arm the nightly alarm on app launch if the user has it enabled. The
+ * enabled-flag persists (SharedPreferences) but the actual OS alarm is cleared
+ * by a force-stop, so this reinstates it every time the app opens.
+ */
+export async function ensureNightlyBackupArmed(): Promise<void> {
+  try {
+    if (await isNightlyBackupOn()) await enableNightlyBackup();
+  } catch {
+    // best-effort
+  }
+}

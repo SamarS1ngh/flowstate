@@ -23,6 +23,7 @@ import SettingsScreen from './screens/SettingsScreen';
 import LoginScreen from './auth/LoginScreen';
 import {openVibesDb} from './db/vibesDb';
 import {currentSource} from './player/controller';
+import {ensureNightlyBackupArmed} from './backup/drive';
 import {
   persistNow,
   restoreSession,
@@ -177,6 +178,11 @@ export default function App() {
         // days later -- shows where the user left off. The first play press
         // resumes it at the saved position (see player/session.ts).
         await restoreSession();
+        // Re-arm the nightly Drive backup alarm on every launch if it's enabled.
+        // A force-stop (and some OEM swipe-kills) cancels the app's alarms, and
+        // the boot receiver only covers reboots -- without this, nightly backup
+        // silently stops after a force-stop even though the toggle still says ON.
+        void ensureNightlyBackupArmed();
       } catch (e) {
         // Anything else (corrupt vibes.db, updateOptions failure, an
         // unexpected setupPlayer rejection, ...) is non-fatal to boot: the
